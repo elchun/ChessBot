@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="knight_B">
+  <link name="piece_body">
+    <inertial>
+      <mass value="0.071"/>
+      <origin xyz="-1.389E-06 0.003 0.029" rpy="0 0 0"/>
+      <inertia ixx="3.744E-05" ixy="-4.645E-10" ixz="4.445E-10" iyy="3.474E-05" iyz="-4.037E-06" izz="1.079E-05"/>
+    </inertial>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0.0415"/>
+      <geometry>
+        <cylinder radius="0.023" length="0.083"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.018 0.0 0"/>
+      <geometry>
+        <sphere radius="0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.009 0.016 0"/>
+      <geometry>
+        <sphere radius="0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.009 -0.016 0"/>
+      <geometry>
+        <sphere radius="0.001"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="Knight_B.obj"/>
+      </geometry>
+    </visual>
+  </link>
+</robot>

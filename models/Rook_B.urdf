@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="Rook_B">
+  <link name="piece_body">
+    <inertial>
+      <mass value="0.061"/>
+      <origin xyz="-1.819E-06 -3.799E-07 0.027" rpy="0 0 0"/>
+      <inertia ixx="3.107E-05" ixy="-6.476E-10" ixz="3.191E-09" iyy="3.107E-05" iyz="0.00" izz="7.999E-06"/>
+    </inertial>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0.0345"/>
+      <geometry>
+        <cylinder radius="0.0205" length="0.069"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.016 0.0 0"/>
+      <geometry>
+        <sphere radius="0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.008 0.014 0"/>
+      <geometry>
+        <sphere radius="0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.008 -0.014 0"/>
+      <geometry>
+        <sphere radius="0.001"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="Rook_B.obj"/>
+      </geometry>
+    </visual>
+  </link>
+</robot>

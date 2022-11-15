@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<robot name="Bishop_B">
+  <link name="piece_body">
+    <inertial>
+      <mass value="0.05"/>
+      <origin xyz="-5.732E-08 0.00 0.029" rpy="0 0 0"/>
+      <inertia ixx="3.741E-05" ixy="0.00" ixz="1.303E-10" iyy="3.736E-05" iyz="-2.403E-07" izz="5.944E-06"/>
+    </inertial>
+    <collision>
+      <origin rpy="0 0 0" xyz="0 0 0.046"/>
+      <geometry>
+        <cylinder radius="0.0205" length="0.092"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="0.016 0.0 0"/>
+      <geometry>
+        <sphere radius="0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.008 0.014 0"/>
+      <geometry>
+        <sphere radius="0.001"/>
+      </geometry>
+    </collision>
+    <collision>
+      <origin rpy="0 0 0" xyz="-0.008 -0.014 0"/>
+      <geometry>
+        <sphere radius="0.001"/>
+      </geometry>
+    </collision>
+    <visual>
+      <origin rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="Bishop_B.obj"/>
+      </geometry>
+    </visual>
+  </link>
+</robot>
