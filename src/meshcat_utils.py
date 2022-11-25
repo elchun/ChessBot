@@ -263,15 +263,75 @@ class WsgButton(LeafSystem):
         self._button = "Open/Close Gripper"
         meshcat.AddButton(self._button, "Space")
         print("Press Space to open/close the gripper")
+        self._prev_clicks = 0
+        self._current_state = False  # Open
 
     def __del__(self):
         self._meshcat.DeleteButton(self._button)
 
     def DoCalcOutput(self, context, output):
-        position = 0.107  # open
-        if (self._meshcat.GetButtonClicks(self._button) % 2) == 1:
-            position = 0.002  # close
+        clicks = self._meshcat.GetButtonClicks(self._button)
+
+        if self._current_state:
+            position = 0.002
+        else:
+            position = 0.107
+        if clicks > self._prev_clicks:
+            print('Clicked')
+            self._current_state = not self._current_state
+            self._prev_clicks = clicks
+
+            print(position)
+
         output.SetAtIndex(0, position)
+
+class WsgButtonPanda(LeafSystem):
+
+    def __init__(self, meshcat):
+        LeafSystem.__init__(self)
+        port = self.DeclareVectorOutputPort("wsg_position", 1,
+                                            self.DoCalcOutput)
+        self.DeclareVectorInputPort("wsg_state_measured", 2)
+        # self.DeclareVectorInputPort("wsg_force_measured", 1)
+
+        port.disable_caching_by_default()
+        self._meshcat = meshcat
+        self._button = "Open/Close Gripper"
+        meshcat.AddButton(self._button, "Space")
+        print("Press Space to open/close the gripper")
+
+        self.state_loc = {
+            'closed': 0.002,
+            'open': 0.050,
+        }
+        self._desired_state = 'open'
+        self._prev_clicks = 0
+
+    def __del__(self):
+        self._meshcat.DeleteButton(self._button)
+
+    def DoCalcOutput(self, context, output):
+        clicks = self._meshcat.GetButtonClicks(self._button)
+
+        current_position = self.GetInputPort('wsg_state_measured').Eval(context)[0]
+        current_state = self.get_current_state(current_position)
+
+        # Only flip state if we are in the previously desired state
+        if current_state == self._desired_state and clicks > self._prev_clicks:
+            self._prev_clicks = clicks
+            if self._desired_state == 'closed':
+                self._desired_state = 'open'
+            else:
+                self._desired_state = 'closed'
+
+        output.SetAtIndex(0, self.state_loc[self._desired_state])
+
+    def get_current_state(self, position, eps = 0.01):
+        open_dis = abs(self.state_loc['open'] - position)
+
+        if open_dis < eps:
+            return 'open'
+        return 'closed'
 
 class PandaHandButton(LeafSystem):
 

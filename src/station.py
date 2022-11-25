@@ -10,7 +10,8 @@ from pydrake.all import (
     DepthImageToPointCloud, DepthRange, DepthRenderCamera, DiagramBuilder,
     FindResourceOrThrow, GeometryInstance, InverseDynamicsController,
     LeafSystem, LoadModelDirectivesFromString,
-    MakeMultibodyStateToWsgStateSystem, MakePhongIllustrationProperties,
+    MakeMultibodyStateToWsgStateSystem, MakeMultibodyForceToWsgForceSystem,
+    MakePhongIllustrationProperties,
     MakeRenderEngineVtk, ModelInstanceIndex, MultibodyPlant, Parser,
     PassThrough, PrismaticJoint, ProcessModelDirectives, RenderCameraCore,
     RenderEngineVtkParams, RevoluteJoint, Rgba, RgbdSensor, RigidTransform,
@@ -273,10 +274,9 @@ def AddPandaDifferentialIK(builder, plant, frame=None):
             log_only_when_result_state_changes=True))
     return differential_ik
 
-# TODO: take argument for whether we want the welded fingers version or not
 def AddWsgPanda(plant,
            panda_model_instance,
-           roll=np.pi / 2.0,
+           roll=np.pi / 4.0,
            sphere=False):
     parser = Parser(plant)
     gripper = parser.AddModelFromFile(
@@ -284,7 +284,8 @@ def AddWsgPanda(plant,
             "drake/manipulation/models/"
             "wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf"))
 
-    X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.09])
+    # X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.09])
+    X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.04])
     plant.WeldFrames(plant.GetFrameByName("panda_link8", panda_model_instance),
                      plant.GetFrameByName("body", gripper), X_7G)
     return gripper
@@ -292,6 +293,7 @@ def AddWsgPanda(plant,
 
 def MakeChessManipulationStation(time_step=0.002,
                                  panda_prefix='panda',
+                                 wsg_prefix='Schunk_Gripper',
                                  camera_prefix='camera'):
     """
     Create Manipulation station with panda.  Hevaily based on MakeManipulationStation.
@@ -310,7 +312,8 @@ def MakeChessManipulationStation(time_step=0.002,
                                                      time_step=time_step)
 
     parser = Parser(plant)
-    AddPanda(plant)
+    panda_idx = AddPanda(plant)
+    AddWsgPanda(plant, ModelInstanceIndex(panda_idx))
     board, board_idx, idx_to_location = AddBoard(plant)
 
     plant.set_stiction_tolerance(0.001)
@@ -351,11 +354,24 @@ def MakeChessManipulationStation(time_step=0.002,
             controller_panda = AddPanda(controller_plant, collide=False)
             controller_plant.Finalize()
 
+            kp = [500] * num_panda_positions
+            ki = [2] * num_panda_positions
+            kd = [30] * num_panda_positions
+
+            kp[-2] = 200
+            ki[-2] = 6
+            kd[-2] = 50
+
+            kp[-1] = 400
+            ki[-1] = 15
+            kd[-1] = 600
+
+
             panda_controller = builder.AddSystem(
                 InverseDynamicsController(controller_plant,
-                                          kp=[100] * num_panda_positions,
-                                          ki=[1] * num_panda_positions,
-                                          kd=[20] * num_panda_positions,
+                                          kp=kp,
+                                          ki=ki,
+                                          kd=kd,
                                           has_reference_acceleration=False))
             panda_controller.set_name(model_instance_name + "_controller")
             builder.Connect(plant.get_state_output_port(model_instance),
@@ -400,6 +416,35 @@ def MakeChessManipulationStation(time_step=0.002,
                 plant.get_generalized_contact_forces_output_port(
                     model_instance), model_instance_name + "_torque_external")
 
+        elif model_instance_name.startswith(wsg_prefix):
+
+            # Wsg controller.
+            wsg_controller = builder.AddSystem(SchunkWsgPositionController())
+            wsg_controller.set_name(model_instance_name + "_controller")
+            builder.Connect(wsg_controller.get_generalized_force_output_port(),
+                            plant.get_actuation_input_port(model_instance))
+            builder.Connect(plant.get_state_output_port(model_instance),
+                            wsg_controller.get_state_input_port())
+            builder.ExportInput(
+                wsg_controller.get_desired_position_input_port(),
+                model_instance_name + "_position")
+            builder.ExportInput(wsg_controller.get_force_limit_input_port(),
+                                model_instance_name + "_force_limit")
+            wsg_mbp_state_to_wsg_state = builder.AddSystem(
+                MakeMultibodyStateToWsgStateSystem())
+
+            # wsg_mbp_force_to_wsg_force = builder.AddSystem(
+            #     MakeMultibodyForceToWsgForceSystem()
+            # )
+
+            builder.Connect(plant.get_state_output_port(model_instance),
+                            wsg_mbp_state_to_wsg_state.get_input_port())
+            # builder.Connect(plant.get_force_output_port(model_instance),
+            #                 wsg_mbp_force_to_wsg_force.get_input_port())
+            builder.ExportOutput(wsg_mbp_state_to_wsg_state.get_output_port(),
+                                 model_instance_name + "_state_measured")
+            # builder.ExportOutput(wsg_mbp_force_to_wsg_force.get_output_port(),
+            #                      model_instance_name + "_force_measured")
     # Cameras.
     AddRgbdSensors(builder,
                    plant,
