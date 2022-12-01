@@ -80,7 +80,8 @@ class Board:
 
 
     model_dir = '../models/'
-    board_fn = 'Board.urdf'
+    board_fn = 'SimpleBoard.urdf'
+    # board_fn = 'Board.sdf'
 
 
     board_spacing = 0.0635  # This is tile spacing in meters (unit of Drake)

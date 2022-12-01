@@ -16,12 +16,72 @@ from pydrake.all import (
     PassThrough, PrismaticJoint, ProcessModelDirectives, RenderCameraCore,
     RenderEngineVtkParams, RevoluteJoint, Rgba, RgbdSensor, RigidTransform,
     RollPitchYaw, RotationMatrix, SchunkWsgPositionController, SpatialInertia,
-    Sphere, StateInterpolatorWithDiscreteDerivative, UnitInertia)
+    Sphere, StateInterpolatorWithDiscreteDerivative, UnitInertia,
+    MeshcatPointCloudVisualizer, ConstantValueSource)
+
 from pydrake.manipulation.planner import (
     DifferentialInverseKinematicsIntegrator,
     DifferentialInverseKinematicsParameters)
 
+from meshcat_utils import AddMeshcatTriad
+
 from board import Board
+
+def AddTriad(source_id,
+             frame_id,
+             scene_graph,
+             length=.25,
+             radius=0.01,
+             opacity=1.,
+             X_FT=RigidTransform(),
+             name="frame"):
+    """
+    Adds illustration geometry representing the coordinate frame, with the
+    x-axis drawn in red, the y-axis in green and the z-axis in blue. The axes
+    point in +x, +y and +z directions, respectively.
+
+    Args:
+      source_id: The source registered with SceneGraph.
+      frame_id: A geometry::frame_id registered with scene_graph.
+      scene_graph: The SceneGraph with which we will register the geometry.
+      length: the length of each axis in meters.
+      radius: the radius of each axis in meters.
+      opacity: the opacity of the coordinate axes, between 0 and 1.
+      X_FT: a RigidTransform from the triad frame T to the frame_id frame F
+      name: the added geometry will have names name + " x-axis", etc.
+    """
+    # x-axis
+    X_TG = RigidTransform(RotationMatrix.MakeYRotation(np.pi / 2),
+                          [length / 2., 0, 0])
+    geom = GeometryInstance(X_FT.multiply(X_TG), Cylinder(radius, length),
+                            name + " x-axis")
+    geom.set_illustration_properties(
+        MakePhongIllustrationProperties([1, 0, 0, opacity]))
+    scene_graph.RegisterGeometry(source_id, frame_id, geom)
+
+    # y-axis
+    X_TG = RigidTransform(RotationMatrix.MakeXRotation(np.pi / 2),
+                          [0, length / 2., 0])
+    geom = GeometryInstance(X_FT.multiply(X_TG), Cylinder(radius, length),
+                            name + " y-axis")
+    geom.set_illustration_properties(
+        MakePhongIllustrationProperties([0, 1, 0, opacity]))
+    scene_graph.RegisterGeometry(source_id, frame_id, geom)
+
+    # z-axis
+    X_TG = RigidTransform([0, 0, length / 2.])
+    geom = GeometryInstance(X_FT.multiply(X_TG), Cylinder(radius, length),
+                            name + " z-axis")
+    geom.set_illustration_properties(
+        MakePhongIllustrationProperties([0, 0, 1, opacity]))
+    scene_graph.RegisterGeometry(source_id, frame_id, geom)
+
+
+def AddMultibodyTriad(frame, scene_graph, length=.25, radius=0.01, opacity=1.):
+    plant = frame.GetParentPlant()
+    AddTriad(plant.get_source_id(),
+             plant.GetBodyFrameIdOrThrow(frame.body().index()), scene_graph,
+             length, radius, opacity, frame.GetFixedPoseInBodyFrame())
 
 def AddPanda(plant, collide=True):
     """
@@ -83,6 +143,7 @@ def AddBoard(plant):
 
     # Weld the table to the world so that it's fixed during the simulation.
     board_frame = plant.GetFrameByName("board_body")
+    # plant.WeldFrames(plant.world_frame(), board_frame, RigidTransform(RollPitchYaw(np.array([0, 0, np.pi/2])), [0, 0, 0]))
     plant.WeldFrames(plant.world_frame(), board_frame)
 
     return board, board_idx, idx_to_location
@@ -294,7 +355,8 @@ def AddWsgPanda(plant,
 def MakeChessManipulationStation(time_step=0.002,
                                  panda_prefix='panda',
                                  wsg_prefix='Schunk_Gripper',
-                                 camera_prefix='camera'):
+                                 camera_prefix='camera',
+                                 meshcat=None):
     """
     Create Manipulation station with panda.  Hevaily based on MakeManipulationStation.
 
@@ -317,6 +379,22 @@ def MakeChessManipulationStation(time_step=0.002,
     board, board_idx, idx_to_location = AddBoard(plant)
 
     plant.set_stiction_tolerance(0.001)
+
+    X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
+    # X_Camera = RigidTransform(RollPitchYaw(np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
+    camera_instance = parser.AddModelFromFile('../models/camera_box.sdf', 'camera')
+    camera_frame = plant.GetFrameByName('base', camera_instance)
+    plant.WeldFrames(plant.world_frame(), camera_frame, X_Camera)
+    AddMultibodyTriad(camera_frame, scene_graph, length=0.1, radius=0.005)
+
+    # Add mustard bottle for debug
+    X_Mustard = RigidTransform(RollPitchYaw(-np.pi/2., 0, -np.pi/2.), [0, 0, 0.09515])
+    parser = Parser(plant)
+    mustard = parser.AddModelFromFile('../models/006_mustard_bottle.sdf')
+    plant.WeldFrames(plant.world_frame(),
+                     plant.GetFrameByName("base_link_mustard", mustard),
+                     X_Mustard)
+
 
     plant.Finalize()
 
@@ -445,11 +523,53 @@ def MakeChessManipulationStation(time_step=0.002,
                                  model_instance_name + "_state_measured")
             # builder.ExportOutput(wsg_mbp_force_to_wsg_force.get_output_port(),
             #                      model_instance_name + "_force_measured")
-    # Cameras.
+
+    # Cameras
     AddRgbdSensors(builder,
                    plant,
                    scene_graph,
                    model_instance_prefix=camera_prefix)
+
+
+
+
+
+
+
+
+    # # Actual camera is rotated pi/2 away from camera model
+    # X_PC = RigidTransform(RollPitchYaw(-np.pi/2, 0, 0), [0, 0, 0])
+    # camera = AddRgbdSensor(builder, scene_graph, X_PC=X_PC,
+    #     parent_frame_id=plant.GetBodyFrameIdOrThrow(camera_frame.body().index()))
+    # camera.set_name("rgbd_sensor")
+
+    # # Export the camera outputs
+    # builder.ExportOutput(camera.color_image_output_port(), "color_image")
+    # builder.ExportOutput(camera.depth_image_32F_output_port(), "depth_image")
+
+    # # Add a system to convert the camera output into a point cloud
+    # to_point_cloud = builder.AddSystem(
+    #     DepthImageToPointCloud(camera_info=camera.depth_camera_info(),
+    #                            fields=BaseField.kXYZs | BaseField.kRGBs))
+    # builder.Connect(camera.depth_image_32F_output_port(),
+    #                 to_point_cloud.depth_image_input_port())
+    # builder.Connect(camera.color_image_output_port(),
+    #                 to_point_cloud.color_image_input_port())
+
+    # # Send the point cloud to meshcat for visualization, too.
+    # point_cloud_visualizer = builder.AddSystem(
+    #     MeshcatPointCloudVisualizer(meshcat, "cloud"))
+    # builder.Connect(to_point_cloud.point_cloud_output_port(),
+    #                 point_cloud_visualizer.cloud_input_port())
+    # camera_pose = builder.AddSystem(
+    #     ConstantValueSource(AbstractValue.Make(X_Camera)))
+    # builder.Connect(camera_pose.get_output_port(),
+    #                 point_cloud_visualizer.pose_input_port())
+
+    # # Export the point cloud output.
+    # builder.ExportOutput(to_point_cloud.point_cloud_output_port(),
+    #                      "point_cloud")
+
 
     # Export "cheat" ports
     builder.ExportOutput(scene_graph.get_query_output_port(), "query_object")

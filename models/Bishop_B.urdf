@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <robot name="Bishop_B">
+  <material name="blue">
+    <color rgba="0 0 0.8 1"/>
+  </material>
+
   <link name="piece_body">
     <inertial>
       <mass value="0.05"/>
@@ -34,7 +38,9 @@
       <origin rpy="0 0 0"/>
       <geometry>
         <mesh filename="Bishop_B.obj"/>
+        <!-- <mesh filename="Bishop_B2.obj"/> -->
       </geometry>
+      <!-- <material name="blue"/> -->
     </visual>
   </link>
 </robot>

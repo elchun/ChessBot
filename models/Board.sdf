@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="Board">
+    <link name="board_body">
+      <inertial>
+        <mass>2.674</mass>
+        <pose>0.00 0.00 -0.01 0 0 0</pose>
+        <inertia>
+          <ixx>0.058</ixx>
+          <ixy>0.00</ixy>
+          <ixz>0.00</ixz>
+          <iyy>0.058</iyy>
+          <iyz>0.00</iyz>
+          <izz>0.115</izz>
+        </inertia>
+      </inertial>
+      <visual name="board_body">
+        <pose> 0 0 0 0 0 0 </pose>
+        <geometry>
+          <mesh>
+            <uri>./simpleBoard.obj</uri>
+          </mesh>
+        </geometry>
+      </visual>
+      <collision name="box_collision">
+        <pose> 0 0 0 0 0 -0.0095 </pose>
+        <geometry>
+          <box>
+            <size>0.508 0.508 0.019</size>
+          </box>
+        </geometry>
+      </collision>
+    </link>
+  </model>
+</sdf>
