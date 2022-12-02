@@ -54,7 +54,7 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq):
         metric_logger.update(loss=losses_reduced, **loss_dict_reduced)
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
-        if cnt % 10 == 0:
+        if cnt % 100 == 0:
             print('Checkpoint')
             torch.save(model.state_dict(), 'weights/chess_maskrcnn_model_check.pt')
 

@@ -95,7 +95,7 @@ class ChessDataset(torch.utils.data.Dataset):
         labels = []
         for id in local_obj_ids:
             piece = self.instance_id_to_class_name[id][-2:]  # piece type is last two values
-            labels.append(pieces.index(piece))
+            labels.append(pieces.index(piece) + 1)
 
         local_obj_ids = np.int16(np.asarray(local_obj_ids))
 
@@ -214,16 +214,22 @@ if __name__ == '__main__':
                                                 gamma=0.1)
 
     # let's train it for 10 epochs
-    num_epochs = 10
+    num_epochs = 50
 
     for epoch in range(num_epochs):
         # train for one epoch, printing every 10 iterations
         train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq=10)
+
+        print('Stepping scheduler')
         # update the learning rate
         lr_scheduler.step()
-        # evaluate on the test dataset
-        evaluate(model, data_loader_test, device=device)
 
-        torch.save(model.state_dict(), 'weights/chess_maskrcnn_model_ep_{epoch:01}.pt')
+        print('Saving model')
+        # Save model in case eval crashes
+        torch.save(model.state_dict(), f'weights/L_chess_maskrcnn_model_ep_{epoch:02}.pt')
+
+        # evaluate on the test dataset
+        # evaluate(model, data_loader_test, device=device)
+
 
     torch.save(model.state_dict(), 'weights/chess_maskrcnn_model.pt')
