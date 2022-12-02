@@ -17,7 +17,7 @@ from pydrake.all import (
     RenderEngineVtkParams, RevoluteJoint, Rgba, RgbdSensor, RigidTransform,
     RollPitchYaw, RotationMatrix, SchunkWsgPositionController, SpatialInertia,
     Sphere, StateInterpolatorWithDiscreteDerivative, UnitInertia,
-    MeshcatPointCloudVisualizer, ConstantValueSource)
+    MeshcatPointCloudVisualizer, ConstantValueSource, Role)
 
 from pydrake.manipulation.planner import (
     DifferentialInverseKinematicsIntegrator,
@@ -128,16 +128,30 @@ def AddPanda(plant, collide=True):
     return panda
 
 
-def AddBoard(plant):
+def AddBoard(plant, inspector):
     board = Board()
 
     parser = Parser(plant)
     board_idx = parser.AddModelFromFile(osp.join(board.model_dir, board.board_fn))
 
     idx_to_location = {}
+
+    instance_id_to_class_name = {}
+
     for location, piece in board.starting_board.items():
         name = location + piece  # Very arbitrary, may change later
         idx = parser.AddModelFromFile(osp.join(board.model_dir, board.piece_to_fn[piece]), name)
+
+        # -- Add labels for label generation -- #
+        frame_id = plant.GetBodyFrameIdOrThrow(
+            plant.GetBodyIndices(idx)[0])
+
+        geometry_ids = inspector.GetGeometries(frame_id, Role.kPerception)
+
+        for geom_id in geometry_ids:
+            instance_id_to_class_name[int(
+                inspector.GetPerceptionProperties(geom_id).GetProperty(
+                    "label", "id"))] = name
 
         idx_to_location[idx] = location
 
@@ -146,6 +160,7 @@ def AddBoard(plant):
     # plant.WeldFrames(plant.world_frame(), board_frame, RigidTransform(RollPitchYaw(np.array([0, 0, np.pi/2])), [0, 0, 0]))
     plant.WeldFrames(plant.world_frame(), board_frame)
 
+    print(instance_id_to_class_name)
     return board, board_idx, idx_to_location
 
 
@@ -173,6 +188,8 @@ def AddRgbdSensor(builder,
                   renderer=None,
                   parent_frame_id=None):
     """
+    Probably not used???
+
     Adds a RgbdSensor to to the scene_graph at (fixed) pose X_PC relative to
     the parent_frame.  If depth_camera is None, then a default camera info will
     be used.  If renderer is None, then we will assume the name 'my_renderer',
@@ -197,7 +214,9 @@ def AddRgbdSensor(builder,
     if not depth_camera:
         depth_camera = DepthRenderCamera(
             RenderCameraCore(
-                renderer, CameraInfo(width=640, height=480, fov_y=np.pi / 4.0),
+                # renderer, CameraInfo(width=640, height=480, fov_y=np.pi / 4.0),
+                # ClippingRange(near=0.1, far=10.0), RigidTransform()),
+                renderer, CameraInfo(width=1920, height=1080, fov_y=np.pi / 4.0),
                 ClippingRange(near=0.1, far=10.0), RigidTransform()),
             DepthRange(0.1, 10.0))
 
@@ -242,7 +261,9 @@ def AddRgbdSensors(builder,
     if not depth_camera:
         depth_camera = DepthRenderCamera(
             RenderCameraCore(
-                renderer, CameraInfo(width=640, height=480, fov_y=np.pi / 4.0),
+                # renderer, CameraInfo(width=640, height=480, fov_y=np.pi / 4.0),
+                # ClippingRange(near=0.1, far=10.0), RigidTransform()),
+                renderer, CameraInfo(width=1920, height=1080, fov_y=np.pi / 6.0),
                 ClippingRange(near=0.1, far=10.0), RigidTransform()),
             DepthRange(0.1, 10.0))
 
@@ -373,27 +394,43 @@ def MakeChessManipulationStation(time_step=0.002,
     plant, scene_graph = AddMultibodyPlantSceneGraph(builder,
                                                      time_step=time_step)
 
+    inspector = scene_graph.model_inspector()
+
     parser = Parser(plant)
     panda_idx = AddPanda(plant)
     AddWsgPanda(plant, ModelInstanceIndex(panda_idx))
-    board, board_idx, idx_to_location = AddBoard(plant)
+    board, board_idx, idx_to_location = AddBoard(plant, inspector)
 
     plant.set_stiction_tolerance(0.001)
 
-    X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
+    # -- Add first camera -- #
+    # 640 x 480
+    # X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
+
+    # Optimized for 1080 x 1920
+    X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.6, 0, -np.pi/2), [-0.65, 0, 0.4])
     # X_Camera = RigidTransform(RollPitchYaw(np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
-    camera_instance = parser.AddModelFromFile('../models/camera_box.sdf', 'camera')
+    camera_instance = parser.AddModelFromFile('../models/camera_box.sdf', 'camera1')
     camera_frame = plant.GetFrameByName('base', camera_instance)
     plant.WeldFrames(plant.world_frame(), camera_frame, X_Camera)
     AddMultibodyTriad(camera_frame, scene_graph, length=0.1, radius=0.005)
 
-    # Add mustard bottle for debug
-    X_Mustard = RigidTransform(RollPitchYaw(-np.pi/2., 0, -np.pi/2.), [0, 0, 0.09515])
-    parser = Parser(plant)
-    mustard = parser.AddModelFromFile('../models/006_mustard_bottle.sdf')
-    plant.WeldFrames(plant.world_frame(),
-                     plant.GetFrameByName("base_link_mustard", mustard),
-                     X_Mustard)
+    # -- Add second camera -- #
+
+    X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.6, 0, np.pi/2), [0.65, 0, 0.4])
+    # X_Camera = RigidTransform(RollPitchYaw(np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
+    camera_instance = parser.AddModelFromFile('../models/camera_box.sdf', 'camera2')
+    camera_frame = plant.GetFrameByName('base', camera_instance)
+    plant.WeldFrames(plant.world_frame(), camera_frame, X_Camera)
+    AddMultibodyTriad(camera_frame, scene_graph, length=0.1, radius=0.005)
+
+    # # Add mustard bottle for debug
+    # X_Mustard = RigidTransform(RollPitchYaw(-np.pi/2., 0, -np.pi/2.), [0, 0, 0.09515])
+    # parser = Parser(plant)
+    # mustard = parser.AddModelFromFile('../models/006_mustard_bottle.sdf')
+    # plant.WeldFrames(plant.world_frame(),
+    #                  plant.GetFrameByName("base_link_mustard", mustard),
+    #                  X_Mustard)
 
 
     plant.Finalize()

@@ -300,12 +300,15 @@ class WsgButtonPanda(LeafSystem):
         meshcat.AddButton(self._button, "Space")
         print("Press Space to open/close the gripper")
 
+        # Define what open and closed distance is (I have the gripper open
+        # less than its maximum travel)
+
         self.state_loc = {
             'closed': 0.002,
             'open': 0.050,
         }
         self._desired_state = 'open'
-        self._prev_clicks = 0
+        self._prev_clicks = 0  # Used to tell if the user has attempted to close
 
     def __del__(self):
         self._meshcat.DeleteButton(self._button)
@@ -327,6 +330,7 @@ class WsgButtonPanda(LeafSystem):
         output.SetAtIndex(0, self.state_loc[self._desired_state])
 
     def get_current_state(self, position, eps = 0.01):
+        # How far the jaws are from being open
         open_dis = abs(self.state_loc['open'] - position)
 
         if open_dis < eps:

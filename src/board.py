@@ -120,6 +120,16 @@ class Board:
 
         return x, y
 
+    def get_xy_location_from_idx(self, x_idx, y_idx):
+        x = self.board_spacing / 2 + self.board_spacing * x_idx
+        y = self.board_spacing / 2 + self.board_spacing * y_idx
+
+        # Origin is in middle of board
+        x -= self.board_spacing * 4
+        y -= self.board_spacing * 4
+
+        return x, y
+
     # def make_board(self, board_dict):
     #     """
     #     board_dict maps locations in algebraic notiation to piece types.  Locations not
