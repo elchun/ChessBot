@@ -1,2 +1,4 @@
 temp_data/*
 vision
+weights/*
+*.pt

@@ -56,7 +56,7 @@ def train_one_epoch(model, optimizer, data_loader, device, epoch, print_freq):
 
         if cnt % 10 == 0:
             print('Checkpoint')
-            torch.save(model.state_dict(), 'chess_maskrcnn_model_check.pt')
+            torch.save(model.state_dict(), 'weights/chess_maskrcnn_model_check.pt')
 
 
 def _get_iou_types(model):

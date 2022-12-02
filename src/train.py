@@ -224,6 +224,6 @@ if __name__ == '__main__':
         # evaluate on the test dataset
         evaluate(model, data_loader_test, device=device)
 
-        torch.save(model.state_dict(), 'chess_maskrcnn_model_ep_{epoch:01}.pt')
+        torch.save(model.state_dict(), 'weights/chess_maskrcnn_model_ep_{epoch:01}.pt')
 
-    torch.save(model.state_dict(), 'chess_maskrcnn_model.pt')
+    torch.save(model.state_dict(), 'weights/chess_maskrcnn_model.pt')
