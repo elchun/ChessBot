@@ -47,18 +47,19 @@ from utils import colorize_labels
 
 from board import Board
 
-_debug = True
-path = 'temp_data'
-num_images = 10
-
+# _debug = True
+# path = 'temp_data'
+# num_images = 10
 
 rng = np.random.default_rng()  # this is for python
 generator = RandomGenerator(rng.integers(1000))  # for c++
 
-
 class ChessDataGen():
 
     def __init__(self):
+        """
+        Class that simulates a chess board to generate data for Mask R-CNN
+        """
         self.station = self.make_data_station()
         self.station_context = self.station.CreateDefaultContext()
 
@@ -70,6 +71,15 @@ class ChessDataGen():
 
 
     def make_data_station(self, time_step=0.002):
+        """
+        Helper function to create the diagram for a chess board
+
+        Args:
+            time_step (float, optional): Timestep of plant. Defaults to 0.002.
+
+        Returns:
+            scene diagram?: Result of builder.Build().
+        """
         builder = DiagramBuilder()
 
         self.plant, self.scene_graph = AddMultibodyPlantSceneGraph(builder,
@@ -83,7 +93,7 @@ class ChessDataGen():
         self.plant.set_stiction_tolerance(0.001)
 
         # Optimized for 1080 x 1920
-        X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.6, 0, -np.pi/2), [-0.65, 0, 0.4])
+        X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.61, 0, -np.pi/2), [-0.65, 0, 0.44])
         # X_Camera = RigidTransform(RollPitchYaw(np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
         camera_instance = self.parser.AddModelFromFile('../models/camera_box.sdf', 'camera')
         camera_frame = self.plant.GetFrameByName('base', camera_instance)
@@ -112,15 +122,24 @@ class ChessDataGen():
         return diagram
 
     def show_label_image(self):
+        """
+        Call this in a ipynb window.  Shows the output of the mask camera image.
+        """
         label_image = self.station.GetOutputPort("camera_label_image").Eval(self.station_context)
         plt.imshow(colorize_labels(label_image.data))
         print('Num Unique values: ', len(np.unique(label_image.data)))
 
     def show_rgb_image(self):
+        """
+        Call this in a ipynb window.  Shows the output of the rgb camera image.
+        """
         color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context)
         plt.imshow(color_image.data)
 
     def save_rgb_image(self, fn='temp_data/test.png'):
+        """
+        Saves rgb camera output as png.
+        """
         color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context)
         im = Image.fromarray(color_image.data)
         im.save(fn)
@@ -134,6 +153,10 @@ class ChessDataGen():
         """
         label_image = self.station.GetOutputPort('camera_label_image').Eval(self.station_context)
         np.save(fn, label_image.data)
+
+    def save_instance_id_to_class_name(self, fn='temp_data/id_to_name'):
+        with open(fn + ".json", "w") as f:
+            json.dump(self.instance_id_to_class_name, f)
 
 
     # def save_label_mask_png(self, fn='temp_data/mask.png'):
@@ -149,6 +172,13 @@ class ChessDataGen():
 
 
     def _add_board(self):
+        """
+        Helper functoin to create and add a board to the station.
+
+        Returns:
+            board, board_idx, idx_to_location, instance_id_to_class_name: Extra
+                information generated when the board is created.
+        """
         board = Board()
 
         parser = Parser(self.plant)
@@ -183,6 +213,9 @@ class ChessDataGen():
         return board, board_idx, idx_to_location, instance_id_to_class_name
 
     def _set_default_board(self):
+        """
+        Move the pieces to the default positions (start of chess game).
+        """
         board_piece_offset = 0.0
         plant_context = self.plant.CreateDefaultContext()
 
@@ -199,6 +232,13 @@ class ChessDataGen():
             self.plant.SetDefaultFreeBodyPose(piece, X_BoardPiece)
 
     def set_arbitrary_board(self, num_pieces=10):
+        """
+        Move <num_pieces> pieces to random locations on the board.  Make sure
+        that no pieces are on top of eachother.
+
+        Args:
+            num_pieces (int, optional): number of pieces to show. Defaults to 10.
+        """
         board_piece_offset = 0.0
         plant_context = self.plant.GetMyMutableContextFromRoot(self.station_context)
 
