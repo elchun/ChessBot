@@ -1,5 +1,5 @@
-# Script to generate a chess dataset
-# Based on https://github.com/RussTedrake/manipulation/blob/master/segmentation_data.py
+# Script to simulate and parse a board
+# Loosely based on https://github.com/RussTedrake/manipulation/blob/master/segmentation_data.py
 
 import argparse
 import json
@@ -13,6 +13,13 @@ import sys
 import shutil
 import warnings
 import random
+
+import torch
+import torchvision
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
+from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights
+import torchvision.transforms.functional as Tf
 
 from pydrake.all import (
     AddMultibodyPlantSceneGraph,
@@ -39,7 +46,8 @@ from pydrake.all import (
     LeafSystem,
     MakeRenderEngineVtk, ModelInstanceIndex, Parser, RenderCameraCore,
     RenderEngineVtkParams, RgbdSensor, RigidTransform,
-    RollPitchYaw, Role, ImageRgba8U)
+    RollPitchYaw, Role,
+    ImageRgba8U, ImageDepth32F)
 # from manipulation.scenarios import ycb, AddRgbdSensor
 from utils import colorize_labels
 
@@ -54,7 +62,7 @@ from board import Board
 rng = np.random.default_rng()  # this is for python
 generator = RandomGenerator(rng.integers(1000))  # for c++
 
-class ChessDataGen():
+class PerceptionStation():
 
     def __init__(self):
         """
@@ -153,10 +161,6 @@ class ChessDataGen():
         color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context).data
         depth_image = self.station.GetOutputPort("camera_depth_image").Eval(self.station_context).data
         label_image = self.station.GetOutputPort("camera_depth_image").Eval(self.station_context).data
-        print(type(self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context)))
-        print(type(self.station.GetOutputPort("camera_depth_image").Eval(self.station_context)))
-
-        print(ImageRgba8U)
         return color_image, depth_image, label_image
 
     def save_rgb_image(self, fn='temp_data/test.png'):
@@ -400,6 +404,7 @@ def AddRgbdSensors(builder,
                         output.get_mutable_value().set(pose.rotation(),
                                                        pose.translation())
 
+
                 camera_pose = builder.AddSystem(ExtractBodyPose(body_index))
                 builder.Connect(plant.get_body_poses_output_port(),
                                 camera_pose.get_input_port())
@@ -411,91 +416,256 @@ def AddRgbdSensors(builder,
                                      f"{model_name}_point_cloud")
 
 
+                masks = builder.AddSystem(ExtractMasks(rgbd))
+                builder.Connect(rgbd.color_image_output_port(),
+                    masks.GetInputPort('rgb_image'))
+                builder.Connect(rgbd.depth_image_32F_output_port(),
+                    masks.GetInputPort('depth_image'))
+                builder.ExportOutput(masks.GetOutputPort('masked_depth_image'),
+                    f"{model_name}_masked_depth_image")
 
-# def generate_images(image_num):
-#     filename_base = os.path.join(path, f"{image_num:05d}")
+                pcds = builder.AddSystem(CreatePointclouds(rgbd))
+                builder.Connect(masks.GetOutputPort('masked_depth_image'),
+                    pcds.GetInputPort('depth_image_stack'))
+                builder.ExportOutput(pcds.GetOutputPort('pcd_stack'),
+                    f"{model_name}_pcd_stack")
 
-#     builder = DiagramBuilder()
-#     station = builder.AddSystem(MakeChessManipulationStation(addRobot=False))
 
-#     plant = station.GetSubsystemByName("plant")
-#     scene_graph = station.GetSubsystemByName("scene_graph")
 
-#     inspector = scene_graph.model_inspector()
 
-#     instance_id_to_class_name = dict()
+class ExtractMasks(LeafSystem):
+    """
+    System to extract masks from rgbd image using Mask R-CNN.
+    """
+    def __init__(self, rgbd_sensor):
+        LeafSystem.__init__(self)
+        self.DeclareAbstractInputPort(
+            'rgb_image',
+            rgbd_sensor.color_image_output_port().Allocate())
+        self.DeclareAbstractInputPort(
+            'depth_image',
+            rgbd_sensor.depth_image_32F_output_port().Allocate())
 
-#     for object_num in range(rng.integers(1, 10)):
-#         this_object = ycb[rng.integers(len(ycb))]
-#         class_name = os.path.splitext(this_object)[0]
-#         sdf = FindResourceOrThrow("drake/manipulation/models/ycb/sdf/"
-#                                   + this_object)
-#         instance = parser.AddModelFromFile(sdf, f"object{object_num}")
+        self.DeclareAbstractOutputPort(
+            'masked_depth_image',
+            lambda: AbstractValue.Make([np.ndarray]),
+            self.get_masks)
 
-#         frame_id = plant.GetBodyFrameIdOrThrow(
-#             plant.GetBodyIndices(instance)[0])
-#         geometry_ids = inspector.GetGeometries(frame_id, Role.kPerception)
-#         for geom_id in geometry_ids:
-#             instance_id_to_class_name[int(
-#                 inspector.GetPerceptionProperties(geom_id).GetProperty(
-#                     "label", "id"))] = class_name
+        self.pieces = [
+            'BB', # : 'Bishop_B.urdf',
+            'BW', # : 'Bishop_W.urdf',
 
-#     plant.Finalize()
+            'KB', # : 'King_B.urdf',
+            'KW', # : 'King_W.urdf',
 
-#     if not debug and not args.test:
-#         with open(filename_base + ".json", "w") as f:
-#             json.dump(instance_id_to_class_name, f)
+            'NB', # : 'Knight_B.urdf',
+            'NW', # : 'Knight_W.urdf',
 
-#     camera = AddRgbdSensor(
-#         builder, scene_graph,
-#         RigidTransform(RollPitchYaw(np.pi, 0, np.pi / 2.0), [0, 0, .8]))
-#     camera.set_name("rgbd_sensor")
-#     builder.ExportOutput(camera.color_image_output_port(), "color_image")
-#     builder.ExportOutput(camera.label_image_output_port(), "label_image")
+            'PB', # : 'Pawn_B.urdf',
+            'PW', # : 'Pawn_W.urdf',
 
-#     diagram = builder.Build()
+            'QB', # : 'Queen_B.urdf',
+            'QW', # : 'Queen_W.urdf',
 
-#     while True:
-#         simulator = Simulator(diagram)
-#         context = simulator.get_mutable_context()
-#         plant_context = plant.GetMyContextFromRoot(context)
+            'RB', # : 'Rook_B.urdf',
+            'RW', # : 'Rook_W.urdf'
+        ]
 
-#         z = 0.1
-#         for body_index in plant.GetFloatingBaseBodies():
-#             tf = RigidTransform(
-#                 UniformlyRandomRotationMatrix(generator),
-#                 [rng.uniform(-.15, .15),
-#                  rng.uniform(-.2, .2), z])
-#             plant.SetFreeBodyPose(plant_context, plant.get_body(body_index), tf)
-#             z += 0.1
+        model_file = 'weights/chess_maskrcnn_model_ror.pt'  # Higher angle and random orient
 
-#         try:
-#             simulator.AdvanceTo(1.0)
-#             break
-#         except RuntimeError:
-#             # I've chosen an aggressive simulation time step which works most
-#             # of the time, but can fail occasionally.
-#             pass
+        # Set up model
+        self.model = self.get_instance_segmentation_model(len(self.pieces) + 1)
 
-#     color_image = diagram.GetOutputPort("color_image").Eval(context)
-#     label_image = diagram.GetOutputPort("label_image").Eval(context)
+        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device(
+            'cpu')
+        self.model.load_state_dict(
+            torch.load(model_file, map_location=self.device))
+        self.model.eval()
+        self.model.to(self.device)
 
-#     if args.test:
-#         pass
-#     elif debug:
-#         plt.figure()
-#         plt.subplot(121)
-#         plt.imshow(color_image.data)
-#         plt.axis('off')
-#         plt.subplot(122)
-#         plt.imshow(colorize_labels(label_image.data))
-#         plt.axis('off')
-#         plt.show()
-#     else:
-#         Image.fromarray(color_image.data).save(f"{filename_base}.png")
-#         np.save(f"{filename_base}_mask", label_image.data)
+    def get_piece_from_label(self, label):
+        return self.pieces[label - 1]
 
+
+    def get_instance_segmentation_model(self, num_classes):
+        # load an instance segmentation model pre-trained on COCO
+        model = torchvision.models.detection.maskrcnn_resnet50_fpn(
+            weights=MaskRCNN_ResNet50_FPN_Weights.DEFAULT)
+
+        # get the number of input features for the classifier
+        in_features = model.roi_heads.box_predictor.cls_score.in_features
+        # replace the pre-trained head with a new one
+        model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+
+        # now get the number of input features for the mask classifier
+        in_features_mask = model.roi_heads.mask_predictor.conv5_mask.in_channels
+        hidden_layer = 256
+        # and replace the mask predictor with a new one
+        model.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask,
+                                                        hidden_layer,
+                                                        num_classes)
+        return model
+
+    def get_masks(self, context, output):
+        thresh = 0.97
+        # print(self.EvalAbstractInput(context, 'rgb_image').get_value())
+        # res = np.repeat(rgb_image[np.newaxis, :, :], 5, axis=0)
+
+        color_image = self.GetInputPort('rgb_image').Eval(context).data
+        color_image = Image.fromarray(np.uint8(color_image)).convert('RGB')
+        depth_image = self.GetInputPort('depth_image').Eval(context).data
+        depth_image = depth_image.squeeze()
+
+        with torch.no_grad():
+            prediction = self.model([Tf.to_tensor(color_image).to(self.device)])
+
+        labels = list(prediction[0]['labels'].cpu().detach().numpy())
+        scores = list(prediction[0]['scores'].cpu().detach().numpy())
+        masks = prediction[0]['masks'].cpu().detach().numpy()
+
+        masked_depth_imgs = []
+        predicted_pieces = []
+        for i, mask in enumerate(masks):
+            if scores[i] < thresh:
+                continue
+            mask = mask.squeeze()
+            masked_depth_img = depth_image * mask
+            masked_depth_imgs.append(masked_depth_img)
+            predicted_pieces.append(self.get_piece_from_label(labels[i]))
+
+        output.set_value([np.stack(masked_depth_imgs, axis=0), predicted_pieces])
+
+class CreatePointclouds(LeafSystem):
+    # def __init__(self, rgbd_sensor, X_WC):
+    def __init__(self, rgbd_sensor):
+        LeafSystem.__init__(self)
+
+        self.cam_info = rgbd_sensor.depth_camera_info()
+        self.X_WC = RigidTransform()
+
+        self.DeclareAbstractInputPort(
+            'depth_image_stack',
+            AbstractValue.Make([np.ndarray]))
+
+        self.DeclareAbstractOutputPort(
+            'pcd_stack',
+            lambda: AbstractValue.Make([np.ndarray]),
+            self.calc_output)
+
+    def get_intrinsics(self):
+        # read camera intrinsics
+        cx = self.cam_info.center_x()
+        cy = self.cam_info.center_y()
+        fx = self.cam_info.focal_x()
+        fy = self.cam_info.focal_y()
+        return cx, cy, fx, fy
+
+    def project_depth_to_pC(self, depth_pixel):
+        """
+        project depth pixels to points in camera frame
+        using pinhole camera model
+        Input:
+            depth_pixels: numpy array of (nx3) or (3,)
+        Output:
+            pC: 3D point in camera frame, numpy array of (nx3)
+        """
+        # switch u,v due to python convention
+        v = depth_pixel[:,0]
+        u = depth_pixel[:,1]
+        Z = depth_pixel[:,2]
+        cx, cy, fx, fy = self.get_intrinsics()
+        X = (u-cx) * Z/fx
+        Y = (v-cy) * Z/fy
+        pC = np.c_[X,Y,Z]
+        return pC
+
+    def get_pointcloud(self, depth_im):
+        u_range = np.arange(depth_im.shape[0])
+        v_range = np.arange(depth_im.shape[1])
+        depth_v, depth_u = np.meshgrid(v_range, u_range)
+        depth_pnts = np.dstack([depth_u, depth_v, depth_im])
+        depth_pnts = depth_pnts.reshape([depth_pnts.shape[0]*depth_pnts.shape[1], 3])
+        pC = self.project_depth_to_pC(depth_pnts)
+        p_C = pC[pC[:,2] > 0]
+        p_W = self.X_WC.multiply(p_C.T).T
+        return p_W
+
+    def calc_output(self, context, output):
+        depth_image_stack, pieces = self.GetInputPort('depth_image_stack').Eval(context)
+        depth_image = depth_image_stack[1]
+        pcd = self.get_pointcloud(depth_image)
+
+        output.set_value(pcd)
+
+
+# class SimpleCameraSystem:
+#     def __init__(self):
+#         diagram = MustardExampleSystem()
+#         context = diagram.CreateDefaultContext()
+
+#         # setup
+#         meshcat.SetProperty("/Background", "visible", False)
+
+#         # getting data
+#         self.point_cloud = diagram.GetOutputPort("camera0_point_cloud").Eval(context)
+#         self.depth_im_read = diagram.GetOutputPort('camera0_depth_image').Eval(context).data.squeeze()
+#         self.depth_im = deepcopy(self.depth_im_read)
+#         self.depth_im[self.depth_im == np.inf] = 10.0
+#         label_im = diagram.GetOutputPort('camera0_label_image').Eval(context).data.squeeze()
+#         self.rgb_im = diagram.GetOutputPort('camera0_rgb_image').Eval(context).data
+#         self.mask = label_im == 1
+
+#         # draw visualization
+#         meshcat.SetObject('point_cloud', self.point_cloud)
+
+#         # camera specs
+#         cam0 = diagram.GetSubsystemByName('camera0')
+#         cam0_context = cam0.GetMyMutableContextFromRoot(context)
+#         self.X_WC = cam0.GetOutputPort('body_pose_in_world').Eval(cam0_context)
+#         self.X_WC = RigidTransform(self.X_WC)  # See drake issue #15973
+#         self.cam_info = cam0.depth_camera_info()
+
+#         # get points for mustard bottle
+#         depth_mustard = self.mask * self.depth_im
+#         u_range = np.arange(depth_mustard.shape[0])
+#         v_range = np.arange(depth_mustard.shape[1])
+#         depth_v, depth_u = np.meshgrid(v_range, u_range)
+#         depth_pnts = np.dstack([depth_u, depth_v, depth_mustard])
+#         depth_pnts = depth_pnts.reshape([depth_pnts.shape[0]*depth_pnts.shape[1], 3])
+#         pC = self.project_depth_to_pC(depth_pnts)
+#         p_C_mustard = pC[pC[:,2] > 0]
+#         self.p_W_mustard = self.X_WC.multiply(p_C_mustard.T).T
+
+#     def get_color_image(self):
+#         return deepcopy(self.rgb_im[:,:,0:3])
+
+#     def get_intrinsics(self):
+#         # read camera intrinsics
+#         cx = self.cam_info.center_x()
+#         cy = self.cam_info.center_y()
+#         fx = self.cam_info.focal_x()
+#         fy = self.cam_info.focal_y()
+#         return cx, cy, fx, fy
+
+#     def project_depth_to_pC(self, depth_pixel):
+#         """
+#         project depth pixels to points in camera frame
+#         using pinhole camera model
+#         Input:
+#             depth_pixels: numpy array of (nx3) or (3,)
+#         Output:
+#             pC: 3D point in camera frame, numpy array of (nx3)
+#         """
+#         # switch u,v due to python convention
+#         v = depth_pixel[:,0]
+#         u = depth_pixel[:,1]
+#         Z = depth_pixel[:,2]
+#         cx, cy, fx, fy = self.get_intrinsics()
+#         X = (u-cx) * Z/fx
+#         Y = (v-cy) * Z/fy
+#         pC = np.c_[X,Y,Z]
+#         return pC
 
 if __name__ == '__main__':
-    data_station = ChessDataGen()
+    data_station = PerceptionStation()
     data_station.show_label_image()
