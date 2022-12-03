@@ -93,7 +93,9 @@ class ChessDataGen():
         self.plant.set_stiction_tolerance(0.001)
 
         # Optimized for 1080 x 1920
-        X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.61, 0, -np.pi/2), [-0.65, 0, 0.44])
+        # X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.61, 0, -np.pi/2), [-0.65, 0, 0.44])
+        # X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.75, 0, -np.pi/2), [-0.65, 0.2667, 0.6])  # for testing position
+        X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.77, 0, -np.pi/2), [-0.63, 0, 0.6])
         # X_Camera = RigidTransform(RollPitchYaw(np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
         camera_instance = self.parser.AddModelFromFile('../models/camera_box.sdf', 'camera')
         camera_frame = self.plant.GetFrameByName('base', camera_instance)
@@ -222,12 +224,19 @@ class ChessDataGen():
         board_frame = self.plant.GetFrameByName("board_body")
         X_WorldBoard= board_frame.CalcPoseInWorld(plant_context)
 
+
         for idx, location in self.idx_to_location.items():
             piece = self.plant.GetBodyByName("piece_body", idx)
-            # benchy = plant.GetBodyByName("benchy_body", name)
             x, y = self.board.get_xy_location(location)
+
+            # Flip white pieces to face the right way
+            if y < 0:
+                yaw = np.pi
+            else:
+                yaw = 0
+
             X_BoardPiece = RigidTransform(
-                RollPitchYaw(np.asarray([0, 0, 0])), p=[x, y, board_piece_offset])
+                RollPitchYaw(np.asarray([0, 0, yaw])), p=[x, y, board_piece_offset])
             X_BoardPiece = X_WorldBoard.multiply(X_BoardPiece)
             self.plant.SetDefaultFreeBodyPose(piece, X_BoardPiece)
 
@@ -263,8 +272,9 @@ class ChessDataGen():
             locations.add((x, y))
             # print('x: ', x, 'y: ', y)
             x, y = self.board.get_xy_location_from_idx(x, y)
+            yaw = np.random.random() * 2 * np.pi
             X_BoardPiece = RigidTransform(
-                RollPitchYaw(np.asarray([0, 0, 0])), p=[x, y, board_piece_offset])
+                RollPitchYaw(np.asarray([0, 0, yaw])), p=[x, y, board_piece_offset])
             X_BoardPiece = X_WorldBoard.multiply(X_BoardPiece)
             self.plant.SetFreeBodyPose(plant_context, piece, X_BoardPiece)
 

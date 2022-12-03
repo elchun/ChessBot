@@ -408,7 +408,10 @@ def MakeChessManipulationStation(time_step=0.002,
     # X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
 
     # Optimized for 1080 x 1920
-    X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.61, 0, -np.pi/2), [-0.65, 0, 0.44])
+    # X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.61, 0, -np.pi/2), [-0.65, 0, 0.44])
+
+    # Higher camera to prevent occlusions
+    X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.77, 0, -np.pi/2), [-0.63, 0, 0.6])
     # X_Camera = RigidTransform(RollPitchYaw(np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
     camera_instance = parser.AddModelFromFile('../models/camera_box.sdf', 'camera1')
     camera_frame = plant.GetFrameByName('base', camera_instance)
@@ -417,7 +420,8 @@ def MakeChessManipulationStation(time_step=0.002,
 
     # -- Add second camera -- #
 
-    X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.61, 0, np.pi/2), [0.65, 0, 0.44])
+    # X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.61, 0, np.pi/2), [0.65, 0, 0.44])
+    X_Camera = RigidTransform(RollPitchYaw(-np.pi/2 + -0.77, 0, np.pi/2), [0.63, 0, 0.6])
     # X_Camera = RigidTransform(RollPitchYaw(np.pi/6, 0, -np.pi/2), [-0.6, 0, 0.4])
     camera_instance = parser.AddModelFromFile('../models/camera_box.sdf', 'camera2')
     camera_frame = plant.GetFrameByName('base', camera_instance)
