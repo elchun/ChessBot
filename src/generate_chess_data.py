@@ -119,6 +119,11 @@ class ChessDataGen():
                     self.scene_graph,
                     model_instance_prefix=camera_prefix)
 
+        # to_point_cloud = builder.AddSystem(
+        #     DepthImageToPointCloud(camera_info = )
+        # )
+        # builder.add
+
         diagram = builder.Build()
         diagram.set_name("ManipulationStation")
         return diagram
@@ -137,6 +142,18 @@ class ChessDataGen():
         """
         color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context)
         plt.imshow(color_image.data)
+
+    def read_rgbd_sensor(self):
+        """
+        Get color, depth, and label images for the board
+
+        Returns:
+            tuple(array): color image, depth image, label image
+        """
+        color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context).data
+        depth_image = self.station.GetOutputPort("camera_depth_image").Eval(self.station_context).data
+        label_image = self.station.GetOutputPort("camera_depth_image").Eval(self.station_context).data
+        return color_image, depth_image, label_image
 
     def save_rgb_image(self, fn='temp_data/test.png'):
         """
@@ -211,7 +228,7 @@ class ChessDataGen():
         # plant.WeldFrames(plant.world_frame(), board_frame, RigidTransform(RollPitchYaw(np.array([0, 0, np.pi/2])), [0, 0, 0]))
         self.plant.WeldFrames(self.plant.world_frame(), board_frame)
 
-        print(instance_id_to_class_name)
+        # print(instance_id_to_class_name)
         return board, board_idx, idx_to_location, instance_id_to_class_name
 
     def _set_default_board(self):
