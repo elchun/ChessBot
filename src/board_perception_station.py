@@ -438,8 +438,6 @@ def AddRgbdSensors(builder,
                     f"{model_name}_pcd_stack")
 
 
-
-
 class ExtractMasks(LeafSystem):
     """
     System to extract masks from rgbd image using Mask R-CNN.
@@ -545,6 +543,9 @@ class ExtractMasks(LeafSystem):
 
 
 class CreatePointclouds(LeafSystem):
+    """
+    System to convert masked depth images into pointclouds.
+    """
     # def __init__(self, rgbd_sensor, X_WC):
     def __init__(self, rgbd_sensor):
         LeafSystem.__init__(self)

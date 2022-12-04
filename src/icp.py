@@ -9,6 +9,8 @@ from scipy.spatial import KDTree
 def icp(scene, model, max_iterations=20, tolerance=1e-3, upright=True):
     '''
     Perform ICP to return the correct relative transform between two set of points.
+    Can throw errors if M != N.  You should randomly sample the larger into the
+    same size as the smaller if possible.
     Args:
         scene: 3xN numpy array of points
         model: 3xM numpy array of points

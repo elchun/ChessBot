@@ -78,6 +78,28 @@ class Board:
         'RW': 'Rook_W.urdf'
     }
 
+    letter_to_idx = {
+        'a': 0,
+        'b': 1,
+        'c': 2,
+        'd': 3,
+        'e': 4,
+        'f': 5,
+        'g': 6,
+        'h': 7
+    }
+
+    idx_to_letter = {
+        0: 'a',
+        1: 'b',
+        2: 'c',
+        3: 'd',
+        4: 'e',
+        5: 'f',
+        6: 'g',
+        7: 'h'
+    }
+
 
     model_dir = '../models/'
     board_fn = 'SimpleBoard.urdf'
@@ -95,18 +117,8 @@ class Board:
         Args:
             location (str): Location in algebraic notation.
         """
-        letter_to_idx = {
-            'a': 0,
-            'b': 1,
-            'c': 2,
-            'd': 3,
-            'e': 4,
-            'f': 5,
-            'g': 6,
-            'h': 7
-        }
 
-        return letter_to_idx[location[0]], int(location[1]) - 1
+        return Board.letter_to_idx[location[0]], int(location[1]) - 1
 
 
     def get_xy_location(self, location):
@@ -129,6 +141,27 @@ class Board:
         y -= self.board_spacing * 4
 
         return x, y
+
+    def coord_to_location(self, coord: tuple[float]) -> tuple:
+        """
+        Get (chess) algebraic location from x, y coordinate pait
+
+        Args:
+            coord (tuple(float)): Real coordinate of piece (with board centered
+                at (0, 0))
+        Returns:
+            tuple(int): index of piece, (x_idx, y_idx) where x goes left to right
+                and y goes front to back
+        """
+        x, y = coord
+        x += self.board_spacing * 4
+        y += self.board_spacing * 4
+
+        x_idx = x // self.board_spacing
+        y_idx = y // self.board_spacing
+
+        return int(x_idx), int(y_idx)
+        # return Board.idx_to_letter[x_idx] + str(int(y_idx) + 1)
 
     # def make_board(self, board_dict):
     #     """
