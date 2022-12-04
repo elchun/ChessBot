@@ -21,6 +21,8 @@ from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
 from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights
 import torchvision.transforms.functional as Tf
 
+from scipy import ndimage
+
 from pydrake.all import (
     AddMultibodyPlantSceneGraph,
     DiagramBuilder,
@@ -36,6 +38,9 @@ from pydrake.all import (
     RenderEngineVtkParams,
     RenderCameraCore,
     DepthRenderCamera,
+    PointCloud,
+    BaseField,
+    Fields,
 )
 
 from pydrake.all import (
@@ -427,6 +432,8 @@ def AddRgbdSensors(builder,
                 pcds = builder.AddSystem(CreatePointclouds(rgbd))
                 builder.Connect(masks.GetOutputPort('masked_depth_image'),
                     pcds.GetInputPort('depth_image_stack'))
+                builder.Connect(rgbd.body_pose_in_world_output_port(),
+                    pcds.GetInputPort('rgbd_sensor_body_pose'))
                 builder.ExportOutput(pcds.GetOutputPort('pcd_stack'),
                     f"{model_name}_pcd_stack")
 
@@ -529,11 +536,13 @@ class ExtractMasks(LeafSystem):
             if scores[i] < thresh:
                 continue
             mask = mask.squeeze()
+            mask = mask > 0.7  # Threshold mask so it only uses high confidence
             masked_depth_img = depth_image * mask
             masked_depth_imgs.append(masked_depth_img)
             predicted_pieces.append(self.get_piece_from_label(labels[i]))
 
         output.set_value([np.stack(masked_depth_imgs, axis=0), predicted_pieces])
+
 
 class CreatePointclouds(LeafSystem):
     # def __init__(self, rgbd_sensor, X_WC):
@@ -541,11 +550,21 @@ class CreatePointclouds(LeafSystem):
         LeafSystem.__init__(self)
 
         self.cam_info = rgbd_sensor.depth_camera_info()
-        self.X_WC = RigidTransform()
+        self.rgbd_sensor = rgbd_sensor
+
+        # sensor_context = rgbd_sensor.GetMyMutableContextFromRoot(context)
+        # self.X_WC = rgbd_sensor.body_pose_in_world_output_port().Eval(sensor_context)
+
+        RigidTransform()
 
         self.DeclareAbstractInputPort(
             'depth_image_stack',
             AbstractValue.Make([np.ndarray]))
+
+        self.DeclareAbstractInputPort(
+            'rgbd_sensor_body_pose',
+            AbstractValue.Make(RigidTransform())
+        )
 
         self.DeclareAbstractOutputPort(
             'pcd_stack',
@@ -579,7 +598,7 @@ class CreatePointclouds(LeafSystem):
         pC = np.c_[X,Y,Z]
         return pC
 
-    def get_pointcloud(self, depth_im):
+    def get_pointcloud_np(self, depth_im, X_WC):
         u_range = np.arange(depth_im.shape[0])
         v_range = np.arange(depth_im.shape[1])
         depth_v, depth_u = np.meshgrid(v_range, u_range)
@@ -587,15 +606,32 @@ class CreatePointclouds(LeafSystem):
         depth_pnts = depth_pnts.reshape([depth_pnts.shape[0]*depth_pnts.shape[1], 3])
         pC = self.project_depth_to_pC(depth_pnts)
         p_C = pC[pC[:,2] > 0]
-        p_W = self.X_WC.multiply(p_C.T).T
+        p_W = X_WC.multiply(p_C.T).T
         return p_W
 
-    def calc_output(self, context, output):
-        depth_image_stack, pieces = self.GetInputPort('depth_image_stack').Eval(context)
-        depth_image = depth_image_stack[1]
-        pcd = self.get_pointcloud(depth_image)
+    def get_drake_pcd(self, pcd_np, X_WC):
+        N = pcd_np.shape[0]
+        pcd = PointCloud(N, Fields(BaseField.kXYZs | BaseField.kRGBs))
+        pcd.mutable_xyzs()[:] = pcd_np.T  # Want (3, N) while pcd_np is (N, 3)
+        pcd.EstimateNormals(radius=0.1, num_closest=30)
+        pcd.FlipNormalsTowardPoint(X_WC.translation())
+        pcd = pcd.VoxelizedDownSample(voxel_size=0.002)
+        return pcd
 
-        output.set_value(pcd)
+
+    def calc_output(self, context, output):
+        # sensor_context = self.rgbd_sensor.GetMyMutableContextFromRoot(context)
+        # X_WC = self.rgbd_sensor.body_pose_in_world_output_port().Eval(context)
+
+        X_WC = self.GetInputPort('rgbd_sensor_body_pose').Eval(context)
+        depth_image_stack, pieces = self.GetInputPort('depth_image_stack').Eval(context)
+        pcds = []
+        for i in range(depth_image_stack.shape[0]):
+            depth_image = depth_image_stack[i]
+            pcd_np = self.get_pointcloud_np(depth_image, X_WC)
+            pcd = self.get_drake_pcd(pcd_np, X_WC)
+            pcds.append(pcd)
+        output.set_value([pcds, pieces])
 
 
 # class SimpleCameraSystem:
