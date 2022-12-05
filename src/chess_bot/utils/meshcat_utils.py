@@ -24,7 +24,46 @@ from pydrake.systems.framework import (DiagramBuilder, EventStatus, LeafSystem,
 
 # Some GUI code that will be moved into Drake.
 
+# Custom status class
+class RobotStatus():
+    def __init__(self):
+        self.gripper_status = 'closed'  # closed or open
 
+        self.value = [-1, -1, -1, -1, -1, -1]  # Is set by MeshcatSliders
+
+        self.value_type_to_idx = {
+            'roll': 0,
+            'pitch': 1,
+            'yaw': 2,
+            'x': 3,
+            'y': 4,
+            'z': 5,
+        }
+
+    def set_gripper_status(self, status):
+        self.gripper_status = status
+
+    def get_gripper_status(self):
+        return self.gripper_status
+
+    def set_pose_value(self, roll=None, pitch=None, yaw=None, x=None, y=None, z=None):
+        if roll is not None:
+            self.value[0] = roll
+        if pitch is not None:
+            self.value[1] = pitch
+        if yaw is not None:
+            self.value[2] = yaw
+        if x is not None:
+            self.value[3] = x
+        if y is not None:
+            self.value[4] = y
+        if z is not None:
+            self.value[5] = z
+
+    def get_pose_value(self, value_type: str) -> float:
+        return self.value[self.value_type_to_idx[value_type]]
+
+# Default and modified meshcat sliders
 class MeshcatSliders(LeafSystem):
     """
     A system that outputs the ``value``s from meshcat sliders.
@@ -357,6 +396,288 @@ class PandaHandButton(LeafSystem):
         if (self._meshcat.GetButtonClicks(self._button) % 2) == 1:
             position = 0.002  # close
         output.SetAtIndex(0, position)
+
+
+class RobotWsgButtonPanda(LeafSystem):
+
+    def __init__(self, meshcat, robot_status: RobotStatus):
+        LeafSystem.__init__(self)
+        port = self.DeclareVectorOutputPort("wsg_position", 1,
+                                            self.DoCalcOutput)
+        self.DeclareVectorInputPort("wsg_state_measured", 2)
+        # self.DeclareVectorInputPort("wsg_force_measured", 1)
+
+        port.disable_caching_by_default()
+        self._meshcat = meshcat
+        self._button = "Open/Close Gripper"
+        meshcat.AddButton(self._button, "Space")
+        print("Press Space to open/close the gripper")
+
+        # Define what open and closed distance is (I have the gripper open
+        # less than its maximum travel)
+
+        self.state_loc = {
+            'closed': 0.002,
+            'open': 0.050,
+        }
+        self._desired_state = 'open'
+        self._prev_clicks = 0  # Used to tell if the user has attempted to close
+        self.robot_status = robot_status
+        self._prev_robot_status = 'open'
+
+    def __del__(self):
+        self._meshcat.DeleteButton(self._button)
+
+    def DoCalcOutput(self, context, output):
+        clicks = self._meshcat.GetButtonClicks(self._button)
+
+        current_position = self.GetInputPort('wsg_state_measured').Eval(context)[0]
+        current_state = self.get_current_state(current_position)
+
+        to_switch = clicks > self._prev_clicks or self._prev_robot_status != self.robot_status.get_gripper_status()
+
+        # Only flip state if we are in the previously desired state
+        if current_state == self._desired_state and to_switch:
+            self._prev_robot_status = self.robot_status.get_gripper_status()
+            self._prev_clicks = clicks
+            if self.robot_status.get_gripper_status() != self._desired_state:
+                if self._desired_state == 'closed':
+                    self._desired_state = 'open'
+                else:
+                    self._desired_state = 'closed'
+
+        output.SetAtIndex(0, self.state_loc[self._desired_state])
+
+    def get_current_state(self, position, eps = 0.01):
+        # How far the jaws are from being open
+        open_dis = abs(self.state_loc['open'] - position)
+
+        if open_dis < eps:
+            return 'open'
+        return 'closed'
+
+
+
+class RobotMeshcatPoseSliders(LeafSystem):
+    """
+    Provides a set of ipywidget sliders (to be used in a Jupyter notebook) with
+    one slider for each of roll, pitch, yaw, x, y, and z.  This can be used,
+    for instance, as an interface to teleoperate the end-effector of a robot.
+
+    .. pydrake_system::
+
+        name: PoseSliders
+        input_ports:
+        - pose (optional)
+        output_ports:
+        - pose
+
+    The optional `pose` input port is used ONLY at initialization; it can be
+    used to set the initial pose e.g. from the current pose of a MultibodyPlant
+    frame.
+    """
+    # TODO(russt): Use namedtuple defaults parameter once we are Python >= 3.7.
+    Visible = namedtuple("Visible", ("roll", "pitch", "yaw", "x", "y", "z"))
+    Visible.__new__.__defaults__ = (True, True, True, True, True, True)
+    MinRange = namedtuple("MinRange", ("roll", "pitch", "yaw", "x", "y", "z"))
+    MinRange.__new__.__defaults__ = (-np.pi, -np.pi, -np.pi, -1.0, -1.0, -1.0)
+    MaxRange = namedtuple("MaxRange", ("roll", "pitch", "yaw", "x", "y", "z"))
+    MaxRange.__new__.__defaults__ = (np.pi, np.pi, np.pi, 1.0, 1.0, 1.0)
+    Value = namedtuple("Value", ("roll", "pitch", "yaw", "x", "y", "z"))
+    Value.__new__.__defaults__ = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    DecrementKey = namedtuple("DecrementKey",
+                              ("roll", "pitch", "yaw", "x", "y", "z"))
+    DecrementKey.__new__.__defaults__ = ("KeyQ", "KeyW", "KeyA", "KeyJ", "KeyI",
+                                         "KeyO")
+    IncrementKey = namedtuple("IncrementKey",
+                              ("roll", "pitch", "yaw", "x", "y", "z"))
+    IncrementKey.__new__.__defaults__ = ("KeyE", "KeyS", "KeyD", "KeyL", "KeyK",
+                                         "KeyU")
+
+    def __init__(self,
+                 meshcat,
+                 robot_status: RobotStatus,
+                 visible=Visible(),
+                 min_range=MinRange(),
+                 max_range=MaxRange(),
+                 value=Value(),
+                 decrement_keycode=DecrementKey(),
+                 increment_keycode=IncrementKey(),
+                 body_index=None):
+        """
+        Args:
+            meshcat: A Meshcat instance.
+            visible: An object with boolean elements for 'roll', 'pitch',
+                     'yaw', 'x', 'y', 'z'; the intention is for this to be the
+                     PoseSliders.Visible() namedtuple.  Defaults to all true.
+            min_range, max_range, value: Objects with float values for 'roll',
+                      'pitch', 'yaw', 'x', 'y', 'z'; the intention is for the
+                      caller to use the PoseSliders.MinRange, MaxRange, and
+                      Value namedtuples.  See those tuples for default values.
+            body_index: if the body_poses input port is connected, then this
+                        index determine which pose is used to set the initial
+                        slider positions during the Initialization event.
+        """
+        LeafSystem.__init__(self)
+        self.robot_status = robot_status
+
+        port = self.DeclareAbstractOutputPort(
+            "pose", lambda: AbstractValue.Make(RigidTransform()),
+            self.DoCalcOutput)
+
+        self.DeclareAbstractInputPort("body_poses",
+                                      AbstractValue.Make([RigidTransform()]))
+        self.DeclareInitializationDiscreteUpdateEvent(self.Initialize)
+
+        # The widgets themselves have undeclared state.  For now, we accept it,
+        # and simply disable caching on the output port.
+        # TODO(russt): consider implementing the more elaborate methods seen
+        # in, e.g., LcmMessageSubscriber.
+        port.disable_caching_by_default()
+
+        self._meshcat = meshcat
+        self._visible = visible
+        self._value = list(value)
+        self._body_index = body_index
+
+        self.robot_status.value = self._value  # Expose meshcatsliders value
+
+        print(type(value))
+        print("Keyboard Controls:")
+        for i in range(6):
+            if visible[i]:
+                meshcat.AddSlider(min=min_range[i],
+                                  max=max_range[i],
+                                  value=value[i],
+                                  step=0.01,
+                                  name=value._fields[i],
+                                  decrement_keycode=decrement_keycode[i],
+                                  increment_keycode=increment_keycode[i])
+                print(
+                    f"{value._fields[i]} : {decrement_keycode[i]} / {increment_keycode[i]}"  # noqa
+                )
+
+    def __del__(self):
+        for s in ['roll', 'pitch', 'yaw', 'x', 'y', 'z']:
+            if visible[s]:
+                self._meshcat.DeleteSlider(s)
+
+    def SetPose(self, pose):
+        """
+        Sets the current value of the sliders.
+
+        Args:
+            pose: Any viable argument for the RigidTransform
+                  constructor.
+        """
+        tf = RigidTransform(pose)
+        self.SetRpy(RollPitchYaw(tf.rotation()))
+        self.SetXyz(tf.translation())
+        self.robot_status.value = self._value.copy()
+
+    def SetRpy(self, rpy):
+        """
+        Sets the current value of the sliders for roll, pitch, and yaw.
+
+        Args:
+            rpy: An instance of drake.math.RollPitchYaw
+        """
+        self._value[0] = rpy.roll_angle()
+        self._value[1] = rpy.pitch_angle()
+        self._value[2] = rpy.yaw_angle()
+        for i in range(3):
+            if self._visible[i]:
+                self._meshcat.SetSliderValue(self._visible._fields[i],
+                                             self._value[i])
+
+    def SetXyz(self, xyz):
+        """
+        Sets the current value of the sliders for x, y, and z.
+
+        Args:
+            xyz: A 3 element iterable object with x, y, z.
+        """
+        self._value[3:] = xyz
+        for i in range(3, 6):
+            if self._visible[i]:
+                self._meshcat.SetSliderValue(self._visible._fields[i],
+                                             self._value[i])
+
+    def _update_values(self):
+        changed = False
+        for i in range(6):
+            if self._visible[i]:
+                old_value = self._value[i]
+                self._value[i] = self._meshcat.GetSliderValue(
+                    self._visible._fields[i])
+                changed = changed or self._value[i] != old_value
+
+        changed_by_status = False
+        for i in range(6):
+            old_value = self._value[i]
+            self._value[i] = self.robot_status.value[i]
+            changed_by_status = changed_by_status or self._value[i] != old_value
+
+        # if changed and not changed_by_status:
+        #     self.robot_status.set_pose_value(*self._value)
+
+        return changed or changed_by_status
+
+    def _get_transform(self):
+        return RigidTransform(
+            RollPitchYaw(self._value[0], self._value[1], self._value[2]),
+            self._value[3:])
+
+    def DoCalcOutput(self, context, output):
+        """Constructs the output values from the sliders."""
+        updated = self._update_values()
+        transform = self._get_transform()
+        if updated:
+            self.SetPose(transform)
+        output.set_value(transform)
+
+    def Initialize(self, context, discrete_state):
+        if self.get_input_port().HasValue(context):
+            if self._body_index is None:
+                raise RuntimeError(
+                    "If the `body_poses` input port is connected, then you "
+                    "must also pass a `body_index` to the constructor.")
+            self.SetPose(self.get_input_port().Eval(context)[self._body_index])
+            return EventStatus.Succeeded()
+        return EventStatus.DidNothing()
+
+    def Run(self, publishing_system, root_context, callback):
+        # Calls callback(root_context, pose), then publishing_system.Publish()
+        # each time the sliders change value.
+        # if not running_as_notebook:
+        #     return
+
+        publishing_context = publishing_system.GetMyContextFromRoot(
+            root_context)
+
+        print("Press the 'Stop PoseSliders' button in Meshcat to continue.")
+        self._meshcat.AddButton("Stop PoseSliders", "Escape")
+        while self._meshcat.GetButtonClicks("Stop PoseSliders") < 1:
+            if self._update_values():
+                print(self._get_transform())
+                callback(root_context, self._get_transform())
+                publishing_system.Publish(publishing_context)
+            time.sleep(.1)
+
+        self._meshcat.DeleteButton("Stop PoseSliders")
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def AddMeshcatTriad(meshcat,

@@ -47,6 +47,7 @@ from pydrake.all import (
     PointCloud,
     BaseField,
     Fields,
+    FixedOffsetFrame
 )
 
 from pydrake.all import (
@@ -78,7 +79,7 @@ from chess_bot.utils.utils import colorize_labels
 
 from chess_bot.resources.board import Board
 from chess_bot.utils.path_util import get_chessbot_src
-from chess_bot.utils.meshcat_utils import MeshcatPoseSliders, WsgButtonPanda, PandaHandButton
+from chess_bot.utils.meshcat_utils import RobotMeshcatPoseSliders, RobotWsgButtonPanda, RobotStatus
 
 from chess_bot.perception.extract_masks import ExtractMasks
 from chess_bot.perception.create_pointclouds import CreatePointclouds
@@ -117,29 +118,46 @@ class GameStation():
         meshcat.ResetRenderMode()
         meshcat.DeleteAddedControls()
 
+        # dif_ik_frame = self.controller_plant.AddFrame(FixedOffsetFrame('panda_gripper_frame',
+        #     self.controller_plant.GetFrameByName("panda_link8"),
+        #     RigidTransform([0, 0, -0.2])))
+
         # Set up differential inverse kinematics.
+        # differential_ik = AddPandaDifferentialIK(
+        #     builder,
+        #     self.controller_plant,
+        #     frame=self.controller_plant.GetFrameByName("panda_link8"))
+
         differential_ik = AddPandaDifferentialIK(
             builder,
             self.controller_plant,
-            frame=self.controller_plant.GetFrameByName("panda_link8"))
+            frame=self.controller_plant.GetFrameByName('panda_gripper_frame'))
         builder.Connect(differential_ik.get_output_port(),
                         self.station.GetInputPort("panda_position"))
         builder.Connect(self.station.GetOutputPort("panda_state_estimated"),
                         differential_ik.GetInputPort("robot_state"))
 
+        init_robot_value = RobotMeshcatPoseSliders.Value(roll=0.0,  # idk if this part works...
+                                            pitch=0.0,
+                                            yaw=0.0,
+                                            x=0.0,
+                                            y=0.0,
+                                            z=0.5)
+        self.robot_status = RobotStatus()
 
         # Set up teleop widgets.
         q0 = [0.0, 0, 0.0, -np.pi/2, 0.0, np.pi/2, np.pi/4]
         teleop = builder.AddSystem(
-            MeshcatPoseSliders(
+            RobotMeshcatPoseSliders(
                 meshcat,
-                min_range=MeshcatPoseSliders.MinRange(roll=0,
+                self.robot_status,
+                min_range=RobotMeshcatPoseSliders.MinRange(roll=0,
                                                         pitch=-0.5,
                                                         yaw=-np.pi,
                                                         x=-0.4,
                                                         y=-0.25,
                                                         z=0.0),
-                max_range=MeshcatPoseSliders.MaxRange(roll=2 * np.pi,
+                max_range=RobotMeshcatPoseSliders.MaxRange(roll=2 * np.pi,
                                                         pitch=np.pi,
                                                         yaw=np.pi,
                                                         x=0.4,
@@ -147,20 +165,14 @@ class GameStation():
                                                         z=0.75),
                 body_index=self.plant.GetBodyByName("panda_link8").index(),
                 # It seems that value is set by the default joint positions, not here.
-                value=MeshcatPoseSliders.Value(roll=0.0,  # idk if this part works...
-                                            pitch=0.0,
-                                            yaw=0.0,
-                                            x=0.0,
-                                            y=0.0,
-                                            z=0.5)))
+                value=init_robot_value))
         builder.Connect(teleop.get_output_port(0),
                         differential_ik.get_input_port(0))
         builder.Connect(self.station.GetOutputPort("body_poses"),
                         teleop.GetInputPort("body_poses"))
 
-        self.robot_status = RobotStatus()
-        wsg_teleop = builder.AddSystem(WsgButtonPanda(meshcat, self.robot_status))
-        # wsg_auto = builder.AddSystem(WsgAuto(self.robot_status))
+        wsg_teleop = builder.AddSystem(RobotWsgButtonPanda(meshcat, self.robot_status))
+
         builder.Connect(wsg_teleop.get_output_port(0),
                         self.station.GetInputPort("Schunk_Gripper_position"))
         builder.Connect(self.station.GetOutputPort("Schunk_Gripper_state_measured"),
@@ -250,7 +262,7 @@ class GameStation():
 
 
             print(f'Robot move: {robot_start_pos} -> {robot_end_pos}')
-            self.make_move(robot_start_pos, robot_end_pos)
+            self.make_move_with_robot(robot_start_pos, robot_end_pos)
 
 
     def _get_player_move(self):
@@ -331,6 +343,7 @@ class GameStation():
         # Add robot system
         panda_idx = AddPanda(self.plant)
         wsg_idx = AddWsgPanda(self.plant, ModelInstanceIndex(panda_idx))
+
 
         self.plant.Finalize()
 
@@ -498,6 +511,11 @@ class GameStation():
                 # Make the plant for the iiwa controller to use.
                 controller_plant = MultibodyPlant(time_step=time_step)
                 controller_panda = AddPanda(controller_plant, collide=False)
+                # Frame for placing control at gripper fingers
+                dif_ik_frame = controller_plant.AddFrame(FixedOffsetFrame('panda_gripper_frame',
+                    controller_plant.GetFrameByName("panda_link8"),
+                    RigidTransform([0.0, 0.02, 0.2])))
+
                 controller_plant.Finalize()
 
                 kp = [500] * num_panda_positions
@@ -505,8 +523,8 @@ class GameStation():
                 kd = [30] * num_panda_positions
 
                 kp[-2] = 200
-                ki[-2] = 6
-                kd[-2] = 50
+                ki[-2] = 20
+                kd[-2] = 80
 
                 kp[-1] = 400
                 ki[-1] = 15
@@ -629,11 +647,68 @@ class GameStation():
         if not made_move:
             print('Could not find piece at location!')
             return False
-        self.robot_status.set_gripper_status('closed')
-        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
-        self.robot_status.set_gripper_status('open')
+        # self.robot_status.set_gripper_status('closed')
+        # print('Robot value: ', self.robot_status.value)
+        # self.robot_status.set_pose_value(x = self.robot_status.get_pose_value('x') + 0.2)
+        # print('Robot value: ', self.robot_status.value)
+        # self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
+        # self.robot_status.set_gripper_status('open')
+        # self.robot_status.set_pose_value(x = self.robot_status.get_pose_value('x') - 0.2)
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
         return True
+
+    def make_move_with_robot(self, start_loc: tuple[int], end_loc: tuple[int]) -> bool:
+        """
+        Move piece at start_loc (0-indexed) to location end_loc (0-indexed).
+
+        Args:
+            start_loc (tuple[int]): tuple of (x, y) location 0-indexed
+            end_loc (tuple[int]): tuple of (x, y) location 0-indexed
+
+        Returns:
+            bool: True if piece was moved, False otherwise
+        """
+        # TODO: Replace this with output from spatial reasoning
+        yaw = self.robot_status.get_pose_value('yaw') - np.pi / 4
+        home_x, home_y, home_z = 0, 0, 0.5
+
+
+        start_x, start_y = self.board.get_xy_location_from_idx(start_loc[0], start_loc[1])
+        end_x, end_y = self.board.get_xy_location_from_idx(end_loc[0], end_loc[1])
+
+        clear_z = 0.15
+        grab_z = 0.0
+
+        self.robot_status.set_gripper_status('open')
+        self.robot_status.set_pose_value(x = start_x, y = start_y, z = clear_z, yaw=yaw)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 15)
+
+        self.robot_status.set_pose_value(x = start_x, y = start_y, z = grab_z)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 6)
+
+        self.robot_status.set_gripper_status('close')
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2)
+
+        self.robot_status.set_pose_value(x = start_x, y = start_y, z = clear_z)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+
+        self.robot_status.set_pose_value(x = end_x, y = end_y, z = clear_z)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+
+        self.robot_status.set_pose_value(x = end_x, y = end_y, z = grab_z)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+
+        self.robot_status.set_gripper_status('open')
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2)
+
+        self.robot_status.set_pose_value(x = end_x, y = end_y, z = clear_z)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+
+        self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 3)
+
+        return True
+
 
     def set_arbitrary_board(self, num_pieces=10):
         """
@@ -858,7 +933,7 @@ def AddPanda(plant, collide=True):
     # Set default positions:
     # q0 = [0.0, 0.0, 0, -1.2, 0, 1.6, 0]
     # q0 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    q0 = [0.0, 0, 0.0, -np.pi/2, 0.0, np.pi/2, np.pi/4]
+    q0 = [0.0, 0, 0.0, -np.pi/2, 0.0, 1.60, np.pi/4]  # Pitch slightly out helps grab
     index = 0
     for joint_index in plant.GetJointIndices(panda):
         joint = plant.get_mutable_joint(joint_index)
@@ -880,7 +955,8 @@ def AddWsgPanda(plant,
             "wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf"))
 
     # X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.09])
-    X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.04])
+    # X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0.01, -0.01, 0.04])
+    X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0.00, 0.00, 0.04])
     plant.WeldFrames(plant.GetFrameByName("panda_link8", panda_model_instance),
                      plant.GetFrameByName("body", gripper), X_7G)
     return gripper
@@ -895,7 +971,7 @@ def AddPandaDifferentialIK(builder, plant, frame=None):
     params.set_end_effector_angular_speed_limit(2)
     params.set_end_effector_translational_velocity_limits([-2, -2, -2],
                                                           [2, 2, 2])
-    panda_velocity_limits = np.array([1.4, 1.4, 1.7, 1.3, 2.2, 2.3, 2.3])
+    panda_velocity_limits = 0.2 * np.array([1.4, 1.4, 1.7, 1.3, 2.2, 2.3, 2.3])
     params.set_joint_velocity_limits(
         (-panda_velocity_limits, panda_velocity_limits))
     params.set_joint_centering_gain(10 * np.eye(7))
@@ -911,17 +987,17 @@ def AddPandaDifferentialIK(builder, plant, frame=None):
     return differential_ik
 
 
-class RobotStatus():
-    def __init__(self):
-        self.gripper_status = 'closed'  # closed or open
+# class RobotStatus():
+#     def __init__(self):
+#         self.gripper_status = 'closed'  # closed or open
 
-    def set_gripper_status(self, status):
-        self.gripper_status = status
+#     def set_gripper_status(self, status):
+#         self.gripper_status = status
 
-    def get_gripper_status(self):
-        return self.gripper_status
+#     def get_gripper_status(self):
+#         return self.gripper_status
 
-# class WsgAuto(LeafSystem):
+# # class WsgAuto(LeafSystem):
 
 #     def __init__(self, robot_status: RobotStatus):
 #         LeafSystem.__init__(self)
@@ -943,60 +1019,60 @@ class RobotStatus():
 
 #         output.SetAtIndex(0, position)
 
-class WsgButtonPanda(LeafSystem):
+# class RobotWsgButtonPanda(LeafSystem):
 
-    def __init__(self, meshcat, robot_status: RobotStatus):
-        LeafSystem.__init__(self)
-        port = self.DeclareVectorOutputPort("wsg_position", 1,
-                                            self.DoCalcOutput)
-        self.DeclareVectorInputPort("wsg_state_measured", 2)
-        # self.DeclareVectorInputPort("wsg_force_measured", 1)
+#     def __init__(self, meshcat, robot_status: RobotStatus):
+#         LeafSystem.__init__(self)
+#         port = self.DeclareVectorOutputPort("wsg_position", 1,
+#                                             self.DoCalcOutput)
+#         self.DeclareVectorInputPort("wsg_state_measured", 2)
+#         # self.DeclareVectorInputPort("wsg_force_measured", 1)
 
-        port.disable_caching_by_default()
-        self._meshcat = meshcat
-        self._button = "Open/Close Gripper"
-        meshcat.AddButton(self._button, "Space")
-        print("Press Space to open/close the gripper")
+#         port.disable_caching_by_default()
+#         self._meshcat = meshcat
+#         self._button = "Open/Close Gripper"
+#         meshcat.AddButton(self._button, "Space")
+#         print("Press Space to open/close the gripper")
 
-        # Define what open and closed distance is (I have the gripper open
-        # less than its maximum travel)
+#         # Define what open and closed distance is (I have the gripper open
+#         # less than its maximum travel)
 
-        self.state_loc = {
-            'closed': 0.002,
-            'open': 0.050,
-        }
-        self._desired_state = 'open'
-        self._prev_clicks = 0  # Used to tell if the user has attempted to close
-        self.robot_status = robot_status
-        self._prev_robot_status = 'open'
+#         self.state_loc = {
+#             'closed': 0.002,
+#             'open': 0.050,
+#         }
+#         self._desired_state = 'open'
+#         self._prev_clicks = 0  # Used to tell if the user has attempted to close
+#         self.robot_status = robot_status
+#         self._prev_robot_status = 'open'
 
-    def __del__(self):
-        self._meshcat.DeleteButton(self._button)
+#     def __del__(self):
+#         self._meshcat.DeleteButton(self._button)
 
-    def DoCalcOutput(self, context, output):
-        clicks = self._meshcat.GetButtonClicks(self._button)
+#     def DoCalcOutput(self, context, output):
+#         clicks = self._meshcat.GetButtonClicks(self._button)
 
-        current_position = self.GetInputPort('wsg_state_measured').Eval(context)[0]
-        current_state = self.get_current_state(current_position)
+#         current_position = self.GetInputPort('wsg_state_measured').Eval(context)[0]
+#         current_state = self.get_current_state(current_position)
 
-        to_switch = clicks > self._prev_clicks or self._prev_robot_status != self.robot_status.get_gripper_status()
+#         to_switch = clicks > self._prev_clicks or self._prev_robot_status != self.robot_status.get_gripper_status()
 
-        # Only flip state if we are in the previously desired state
-        if current_state == self._desired_state and to_switch:
-            self._prev_robot_status = self.robot_status.get_gripper_status()
-            self._prev_clicks = clicks
-            if self.robot_status.get_gripper_status() != self._desired_state:
-                if self._desired_state == 'closed':
-                    self._desired_state = 'open'
-                else:
-                    self._desired_state = 'closed'
+#         # Only flip state if we are in the previously desired state
+#         if current_state == self._desired_state and to_switch:
+#             self._prev_robot_status = self.robot_status.get_gripper_status()
+#             self._prev_clicks = clicks
+#             if self.robot_status.get_gripper_status() != self._desired_state:
+#                 if self._desired_state == 'closed':
+#                     self._desired_state = 'open'
+#                 else:
+#                     self._desired_state = 'closed'
 
-        output.SetAtIndex(0, self.state_loc[self._desired_state])
+#         output.SetAtIndex(0, self.state_loc[self._desired_state])
 
-    def get_current_state(self, position, eps = 0.01):
-        # How far the jaws are from being open
-        open_dis = abs(self.state_loc['open'] - position)
+#     def get_current_state(self, position, eps = 0.01):
+#         # How far the jaws are from being open
+#         open_dis = abs(self.state_loc['open'] - position)
 
-        if open_dis < eps:
-            return 'open'
-        return 'closed'
+#         if open_dis < eps:
+#             return 'open'
+#         return 'closed'
