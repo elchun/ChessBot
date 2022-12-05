@@ -1,1 +1,0 @@
-export CHESSBOT_SOURCE_DIR=$PWD/src/chess_bot
