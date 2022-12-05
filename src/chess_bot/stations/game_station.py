@@ -613,7 +613,6 @@ class GameStation():
                 self.plant.SetFreeBodyPose(self.mut_plant_context,
                     piece, new_pose)
                 print('Set pose!')
-                self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2)
                 made_move = True
 
             if self.board.coord_to_index((xyz[0], xyz[1])) == end_loc:
@@ -622,11 +621,11 @@ class GameStation():
                 new_pose = RigidTransform(pose.rotation(), new_xyz)
                 self.plant.SetFreeBodyPose(self.mut_plant_context,
                     piece, new_pose)
-                self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2)
 
         if not made_move:
             print('Could not find piece at location!')
             return False
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2)
         return True
 
     def set_arbitrary_board(self, num_pieces=10):
