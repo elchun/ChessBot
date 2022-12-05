@@ -148,7 +148,7 @@ class MeshcatPoseSliders(LeafSystem):
                 meshcat.AddSlider(min=min_range[i],
                                   max=max_range[i],
                                   value=value[i],
-                                  step=0.02,
+                                  step=0.01,
                                   name=value._fields[i],
                                   decrement_keycode=decrement_keycode[i],
                                   increment_keycode=increment_keycode[i])

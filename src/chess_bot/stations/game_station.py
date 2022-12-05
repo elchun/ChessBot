@@ -64,6 +64,9 @@ from pydrake.all import (
     Sphere, StateInterpolatorWithDiscreteDerivative, UnitInertia,
     MeshcatPointCloudVisualizer, ConstantValueSource, Role)
 
+from pydrake.systems.framework import (DiagramBuilder, EventStatus, LeafSystem,
+                                       PublishEvent, VectorSystem)
+
 from pydrake.geometry import (Cylinder, MeshcatVisualizer,
                               MeshcatVisualizerParams, Rgba, Role, Sphere)
 
@@ -155,13 +158,13 @@ class GameStation():
         builder.Connect(self.station.GetOutputPort("body_poses"),
                         teleop.GetInputPort("body_poses"))
 
-        wsg_teleop = builder.AddSystem(WsgButtonPanda(meshcat))
+        self.robot_status = RobotStatus()
+        wsg_teleop = builder.AddSystem(WsgButtonPanda(meshcat, self.robot_status))
+        # wsg_auto = builder.AddSystem(WsgAuto(self.robot_status))
         builder.Connect(wsg_teleop.get_output_port(0),
                         self.station.GetInputPort("Schunk_Gripper_position"))
         builder.Connect(self.station.GetOutputPort("Schunk_Gripper_state_measured"),
                         wsg_teleop.GetInputPort('wsg_state_measured'))
-        # builder.Connect(station.GetOutputPort("Schunk_Gripper_force_measured"),
-        #                 wsg_teleop.GetInputPort('wsg_force_measured'))
 
         diagram = builder.Build()
         # context = diagram.CreateDefaultContext()
@@ -178,6 +181,7 @@ class GameStation():
         self.mut_plant_context = diagram.GetMutableSubsystemContext(self.plant, context)
 
         self.simulator.set_target_realtime_rate(1.0)
+        # self.simulator.set_publish_every_time_step(True)
 
         meshcat.AddButton("Stop Simulation", "Escape")
         print("Press Escape to stop the simulation")
@@ -625,7 +629,10 @@ class GameStation():
         if not made_move:
             print('Could not find piece at location!')
             return False
-        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2)
+        self.robot_status.set_gripper_status('closed')
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
+        self.robot_status.set_gripper_status('open')
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
         return True
 
     def set_arbitrary_board(self, num_pieces=10):
@@ -902,3 +909,94 @@ def AddPandaDifferentialIK(builder, plant, frame=None):
             params,
             log_only_when_result_state_changes=True))
     return differential_ik
+
+
+class RobotStatus():
+    def __init__(self):
+        self.gripper_status = 'closed'  # closed or open
+
+    def set_gripper_status(self, status):
+        self.gripper_status = status
+
+    def get_gripper_status(self):
+        return self.gripper_status
+
+# class WsgAuto(LeafSystem):
+
+#     def __init__(self, robot_status: RobotStatus):
+#         LeafSystem.__init__(self)
+#         port = self.DeclareVectorOutputPort("wsg_position", 1,
+#                                             self.DoCalcOutput)
+#         port.disable_caching_by_default()
+#         self.robot_status = robot_status
+#         self.prev_status = 'closed'
+
+#     def DoCalcOutput(self, context, output):
+#         new_status = self.robot_status.get_gripper_status()
+#         if self.prev_status != new_status:
+#             print(new_status)
+#             self.prev_status = new_status
+#         if self.robot_status.get_gripper_status() == 'closed':
+#             position = 0.002
+#         else:
+#             position = 0.107
+
+#         output.SetAtIndex(0, position)
+
+class WsgButtonPanda(LeafSystem):
+
+    def __init__(self, meshcat, robot_status: RobotStatus):
+        LeafSystem.__init__(self)
+        port = self.DeclareVectorOutputPort("wsg_position", 1,
+                                            self.DoCalcOutput)
+        self.DeclareVectorInputPort("wsg_state_measured", 2)
+        # self.DeclareVectorInputPort("wsg_force_measured", 1)
+
+        port.disable_caching_by_default()
+        self._meshcat = meshcat
+        self._button = "Open/Close Gripper"
+        meshcat.AddButton(self._button, "Space")
+        print("Press Space to open/close the gripper")
+
+        # Define what open and closed distance is (I have the gripper open
+        # less than its maximum travel)
+
+        self.state_loc = {
+            'closed': 0.002,
+            'open': 0.050,
+        }
+        self._desired_state = 'open'
+        self._prev_clicks = 0  # Used to tell if the user has attempted to close
+        self.robot_status = robot_status
+        self._prev_robot_status = 'open'
+
+    def __del__(self):
+        self._meshcat.DeleteButton(self._button)
+
+    def DoCalcOutput(self, context, output):
+        clicks = self._meshcat.GetButtonClicks(self._button)
+
+        current_position = self.GetInputPort('wsg_state_measured').Eval(context)[0]
+        current_state = self.get_current_state(current_position)
+
+        to_switch = clicks > self._prev_clicks or self._prev_robot_status != self.robot_status.get_gripper_status()
+
+        # Only flip state if we are in the previously desired state
+        if current_state == self._desired_state and to_switch:
+            self._prev_robot_status = self.robot_status.get_gripper_status()
+            self._prev_clicks = clicks
+            if self.robot_status.get_gripper_status() != self._desired_state:
+                if self._desired_state == 'closed':
+                    self._desired_state = 'open'
+                else:
+                    self._desired_state = 'closed'
+
+        output.SetAtIndex(0, self.state_loc[self._desired_state])
+
+    def get_current_state(self, position, eps = 0.01):
+        # How far the jaws are from being open
+        open_dis = abs(self.state_loc['open'] - position)
+
+        if open_dis < eps:
+            return 'open'
+        return 'closed'
