@@ -1,6 +1,7 @@
 # Script to simulate and parse a board
 # Loosely based on https://github.com/RussTedrake/manipulation/blob/master/segmentation_data.py
 from IPython.display import clear_output
+from copy import deepcopy
 
 import argparse
 import json
@@ -25,6 +26,8 @@ import torchvision.transforms.functional as Tf
 from scipy import ndimage
 
 from plotly.offline import init_notebook_mode, iplot
+
+from stockfish import Stockfish
 
 from pydrake.all import (
     AddMultibodyPlantSceneGraph,
@@ -89,6 +92,10 @@ class GameStation():
         """
         Class that simulates a chess board to generate data for Mask R-CNN
         """
+        try:
+            self.stockfish = Stockfish('/opt/homebrew/bin/stockfish')
+        except:
+            raise ValueError('Enter your own stockfish path')
         self.meshcat = meshcat
         builder = DiagramBuilder()
 
@@ -178,28 +185,68 @@ class GameStation():
         self.simulator.AdvanceTo(0.01)
 
     def play_game(self):
+        prev_board = deepcopy(Board.starting_board_list)
         while True:
-            clear_output()
             # Get player move (Player is always white)
             player_start_pos, player_end_pos = self._get_player_move()
+            clear_output()
             if not self.make_move(player_start_pos, player_end_pos):
                 print('Invalid move')
                 continue
 
-            # Get robot move
+            # -- Run perception system to get pcds-- #
             print('Getting robot move')
             pcds, pieces = self.get_processed_pcds()
             location_to_piece = self.extract_piece_locations(pcds, pieces)
 
-            res = [['  ' for i in range(8)] for j in range(8)]
+            current_board = [['  ' for i in range(8)] for j in range(8)]
             for coord, piece in location_to_piece:
-                loc = self.board.coord_to_location(coord)
-                res[7-loc[1]][loc[0]] = piece
-            print(res)
+                loc = self.board.coord_to_index(coord)
+                current_board[loc[0]][loc[1]] = piece
+                # res[7-loc[1]][loc[0]] = piece
+
+            # -- Plot perception system -- #
+            print('-'*23)
+            print('Robot understanding of board:')
+            Board.print_board(current_board)
+            print('-'*23)
+
             fig = multiplot(pcds)
             fig_path = osp.join(get_chessbot_src(), 'demos/game_viz.html')
             fig.write_html(fig_path)
             iplot(fig)
+
+
+            # -- Derive player move from perception -- #
+            derived_player_move = Board.get_move(prev_board, current_board)
+
+            print(f'Actual move: {player_start_pos} -> {player_end_pos}')
+            print(f'Predicted move: {derived_player_move[0]} -> {derived_player_move[1]}')
+
+            der_player_start_pos_str = Board.index_to_location(derived_player_move[0])
+            der_player_end_pos_str = Board.index_to_location(derived_player_move[1])
+            der_player_move = der_player_start_pos_str + der_player_end_pos_str
+
+            # Update internal boards
+            self.stockfish.make_moves_from_current_position([der_player_move])
+            prev_board[derived_player_move[1][0]][derived_player_move[1][1]] = prev_board[derived_player_move[0][0]][derived_player_move[0][1]]
+            prev_board[derived_player_move[0][0]][derived_player_move[0][1]] = '  '
+
+
+            robot_move = self.stockfish.get_best_move()
+            self.stockfish.make_moves_from_current_position([robot_move])
+
+            robot_start_pos_str = robot_move[:2]
+            robot_end_pos_str = robot_move[2:]
+            robot_start_pos = Board.location_to_coord(robot_start_pos_str)
+            robot_end_pos = Board.location_to_coord(robot_end_pos_str)
+
+            prev_board[robot_end_pos[0]][robot_end_pos[1]] = prev_board[robot_start_pos[0]][robot_start_pos[1]]
+            prev_board[robot_start_pos[0]][robot_start_pos[1]] = '  '
+
+
+            print(f'Robot move: {robot_start_pos} -> {robot_end_pos}')
+            self.make_move(robot_start_pos, robot_end_pos)
 
 
     def _get_player_move(self):
@@ -552,23 +599,35 @@ class GameStation():
         Returns:
             bool: True if piece was moved, False otherwise
         """
+        made_move = False
         for idx in self.idx_to_location.keys():
             piece = self.plant.GetBodyByName("piece_body", idx)
             pose = self.plant.GetFreeBodyPose(self.mut_plant_context,
                 piece)
 
             xyz = pose.translation()
-            if self.board.coord_to_location((xyz[0], xyz[1])) == start_loc:
+            if self.board.coord_to_index((xyz[0], xyz[1])) == start_loc:
                 new_x, new_y = self.board.get_xy_location_from_idx(end_loc[0], end_loc[1])
                 new_xyz = np.array([new_x, new_y, xyz[-1]])
                 new_pose = RigidTransform(pose.rotation(), new_xyz)
                 self.plant.SetFreeBodyPose(self.mut_plant_context,
                     piece, new_pose)
                 print('Set pose!')
-                self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 0.02)
-                return True
-        print('Could not find piece at location!')
-        return False
+                self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2)
+                made_move = True
+
+            if self.board.coord_to_index((xyz[0], xyz[1])) == end_loc:
+                new_x, new_y = 1, 1
+                new_xyz = np.array([new_x, new_y, xyz[-1]])
+                new_pose = RigidTransform(pose.rotation(), new_xyz)
+                self.plant.SetFreeBodyPose(self.mut_plant_context,
+                    piece, new_pose)
+                self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2)
+
+        if not made_move:
+            print('Could not find piece at location!')
+            return False
+        return True
 
     def set_arbitrary_board(self, num_pieces=10):
         """
