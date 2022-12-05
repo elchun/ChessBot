@@ -1,0 +1,5 @@
+setup.py
+chess_bot.egg-info/PKG-INFO
+chess_bot.egg-info/SOURCES.txt
+chess_bot.egg-info/dependency_links.txt
+chess_bot.egg-info/top_level.txt
