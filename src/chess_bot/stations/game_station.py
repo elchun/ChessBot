@@ -1,5 +1,6 @@
 # Script to simulate and parse a board
 # Loosely based on https://github.com/RussTedrake/manipulation/blob/master/segmentation_data.py
+from IPython.display import clear_output
 
 import argparse
 import json
@@ -23,6 +24,8 @@ import torchvision.transforms.functional as Tf
 
 from scipy import ndimage
 
+from plotly.offline import init_notebook_mode, iplot
+
 from pydrake.all import (
     AddMultibodyPlantSceneGraph,
     DiagramBuilder,
@@ -44,43 +47,204 @@ from pydrake.all import (
 )
 
 from pydrake.all import (
-    AbstractValue, Adder, AddMultibodyPlantSceneGraph, BallRpyJoint, BaseField,
-    Box, CameraInfo, ClippingRange,
+    AbstractValue, Adder, AddMultibodyPlantSceneGraph, BaseField,
+    Box, CameraInfo, ClippingRange, CoulombFriction, Cylinder, Demultiplexer,
     DepthImageToPointCloud, DepthRange, DepthRenderCamera, DiagramBuilder,
-    FindResourceOrThrow,
-    LeafSystem,
-    MakeRenderEngineVtk, ModelInstanceIndex, Parser, RenderCameraCore,
-    RenderEngineVtkParams, RgbdSensor, RigidTransform,
-    RollPitchYaw, Role,
-    ImageRgba8U, ImageDepth32F)
+    FindResourceOrThrow, GeometryInstance, InverseDynamicsController,
+    LeafSystem, LoadModelDirectivesFromString,
+    MakeMultibodyStateToWsgStateSystem, MakeMultibodyForceToWsgForceSystem,
+    MakePhongIllustrationProperties,
+    MakeRenderEngineVtk, ModelInstanceIndex, MultibodyPlant, Parser,
+    PassThrough, PrismaticJoint, ProcessModelDirectives, RenderCameraCore,
+    RenderEngineVtkParams, RevoluteJoint, Rgba, RgbdSensor, RigidTransform,
+    RollPitchYaw, RotationMatrix, SchunkWsgPositionController, SpatialInertia,
+    Sphere, StateInterpolatorWithDiscreteDerivative, UnitInertia,
+    MeshcatPointCloudVisualizer, ConstantValueSource, Role)
+
+from pydrake.geometry import (Cylinder, MeshcatVisualizer,
+                              MeshcatVisualizerParams, Rgba, Role, Sphere)
+
+from pydrake.manipulation.planner import (
+    DifferentialInverseKinematicsIntegrator,
+    DifferentialInverseKinematicsParameters)
 
 from chess_bot.utils.utils import colorize_labels
 
 from chess_bot.resources.board import Board
 from chess_bot.utils.path_util import get_chessbot_src
+from chess_bot.utils.meshcat_utils import MeshcatPoseSliders, WsgButtonPanda, PandaHandButton
+
 from chess_bot.perception.extract_masks import ExtractMasks
 from chess_bot.perception.create_pointclouds import CreatePointclouds
 from chess_bot.perception.icp_system import ICPSystem
+
+from chess_bot.utils.plotly_utils import multiplot
+
 
 rng = np.random.default_rng()  # this is for python
 generator = RandomGenerator(rng.integers(1000))  # for c++
 
 class GameStation():
-    def __init__(self):
+    def __init__(self, meshcat):
         """
         Class that simulates a chess board to generate data for Mask R-CNN
         """
-        self.station = self.make_data_station()
+        self.meshcat = meshcat
+        builder = DiagramBuilder()
+
+        self.station = builder.AddSystem(self.make_station())
+
         self.station_context = self.station.CreateDefaultContext()
 
-        self.simulator = Simulator(self.station)
-        self.simulator_context = self.simulator.get_mutable_context()
+        self.controller_plant = self.station.GetSubsystemByName(
+            "panda_controller").get_multibody_plant_for_control()
+
+        viz = MeshcatVisualizer.AddToBuilder(
+            builder,
+            self.station.GetOutputPort("query_object"),
+            meshcat)
+
+        meshcat.ResetRenderMode()
+        meshcat.DeleteAddedControls()
+
+        # Set up differential inverse kinematics.
+        differential_ik = AddPandaDifferentialIK(
+            builder,
+            self.controller_plant,
+            frame=self.controller_plant.GetFrameByName("panda_link8"))
+        builder.Connect(differential_ik.get_output_port(),
+                        self.station.GetInputPort("panda_position"))
+        builder.Connect(self.station.GetOutputPort("panda_state_estimated"),
+                        differential_ik.GetInputPort("robot_state"))
+
+
+        # Set up teleop widgets.
+        q0 = [0.0, 0, 0.0, -np.pi/2, 0.0, np.pi/2, np.pi/4]
+        teleop = builder.AddSystem(
+            MeshcatPoseSliders(
+                meshcat,
+                min_range=MeshcatPoseSliders.MinRange(roll=0,
+                                                        pitch=-0.5,
+                                                        yaw=-np.pi,
+                                                        x=-0.4,
+                                                        y=-0.25,
+                                                        z=0.0),
+                max_range=MeshcatPoseSliders.MaxRange(roll=2 * np.pi,
+                                                        pitch=np.pi,
+                                                        yaw=np.pi,
+                                                        x=0.4,
+                                                        y=0.25,
+                                                        z=0.75),
+                body_index=self.plant.GetBodyByName("panda_link8").index(),
+                # It seems that value is set by the default joint positions, not here.
+                value=MeshcatPoseSliders.Value(roll=0.0,  # idk if this part works...
+                                            pitch=0.0,
+                                            yaw=0.0,
+                                            x=0.0,
+                                            y=0.0,
+                                            z=0.5)))
+        builder.Connect(teleop.get_output_port(0),
+                        differential_ik.get_input_port(0))
+        builder.Connect(self.station.GetOutputPort("body_poses"),
+                        teleop.GetInputPort("body_poses"))
+
+        wsg_teleop = builder.AddSystem(WsgButtonPanda(meshcat))
+        builder.Connect(wsg_teleop.get_output_port(0),
+                        self.station.GetInputPort("Schunk_Gripper_position"))
+        builder.Connect(self.station.GetOutputPort("Schunk_Gripper_state_measured"),
+                        wsg_teleop.GetInputPort('wsg_state_measured'))
+        # builder.Connect(station.GetOutputPort("Schunk_Gripper_force_measured"),
+        #                 wsg_teleop.GetInputPort('wsg_force_measured'))
+
+        diagram = builder.Build()
+        # context = diagram.CreateDefaultContext()
+
+        # self.plant_context = self.plant.CreateDefaultContext()
+
+        # plant.SetPositions(context_plant, plant.GetModelInstanceByName("panda"), q0)
+
+        self.simulator = Simulator(diagram)
+        context = self.simulator.get_mutable_context()
+
+        self.mut_station_context = diagram.GetMutableSubsystemContext(self.station, context)
+
+        self.mut_plant_context = diagram.GetMutableSubsystemContext(self.plant, context)
+
+        self.simulator.set_target_realtime_rate(1.0)
+
+        meshcat.AddButton("Stop Simulation", "Escape")
+        print("Press Escape to stop the simulation")
+
         self.simulator.AdvanceTo(0.01)
 
-        # self.sim_time = 0.0
+    def play_game(self):
+        while True:
+            clear_output()
+            # Get player move (Player is always white)
+            player_start_pos, player_end_pos = self._get_player_move()
+            if not self.make_move(player_start_pos, player_end_pos):
+                print('Invalid move')
+                continue
+
+            # Get robot move
+            print('Getting robot move')
+            pcds, pieces = self.get_processed_pcds()
+            location_to_piece = self.extract_piece_locations(pcds, pieces)
+
+            res = [['  ' for i in range(8)] for j in range(8)]
+            for coord, piece in location_to_piece:
+                loc = self.board.coord_to_location(coord)
+                res[7-loc[1]][loc[0]] = piece
+            print(res)
+            fig = multiplot(pcds)
+            fig_path = osp.join(get_chessbot_src(), 'demos/game_viz.html')
+            fig.write_html(fig_path)
+            iplot(fig)
 
 
-    def make_data_station(self, time_step=0.002):
+    def _get_player_move(self):
+        player_start_pos = input('Enter start move as (x, y)')
+        player_end_pos = input('Enter end move as (x, y)')
+
+        player_start_pos = player_start_pos.strip('()')
+        player_start_pos = tuple([int(i) for i in player_start_pos.split(',')])
+
+        player_end_pos = player_end_pos.strip('()')
+        player_end_pos = tuple([int(i) for i in player_end_pos.split(',')])
+
+        return player_start_pos, player_end_pos
+
+
+    def extract_piece_locations(self, pcds: list[np.ndarray], pieces: list[str]) -> list:
+        """
+        Get piece locations from raw pointclouds.  list of (location, piece) pairs
+
+        Args:
+            pcds (list(np.ndarray)): list of pcds in N x 3 format
+            pieces (list(str)): list of predicted piece types
+
+        Returns:
+            list: (location, piece) tuples where location is (x, y) position in meters
+        """
+        res = []
+        for i, pcd in enumerate(pcds):
+            mean_loc = list(np.mean(pcd[:, :2], axis=0))
+            res.append((mean_loc, pieces[i]))
+        return res
+
+    def run_teleop(self):
+        self.meshcat.AddButton("Stop Simulation", "Escape")
+        while self.meshcat.GetButtonClicks("Stop Simulation") < 1:
+            self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2.0)
+
+        sim_context = self.simulator.get_context()
+
+
+        self.meshcat.DeleteButton("Stop Simulation")
+        self.station.Publish(self.station_context)
+
+
+    def make_station(self, time_step=0.002):
         """
         Helper function to create the diagram for a chess board
 
@@ -113,9 +277,14 @@ class GameStation():
         self.plant.WeldFrames(self.plant.world_frame(), camera_frame, X_Camera)
         # AddMultibodyTriad(camera_frame, scene_graph, length=0.1, radius=0.005)
 
+        # Add robot system
+        panda_idx = AddPanda(self.plant)
+        wsg_idx = AddWsgPanda(self.plant, ModelInstanceIndex(panda_idx))
+
         self.plant.Finalize()
 
         self._set_default_board()
+        self._connect_robot(builder, time_step, panda_prefix='panda', wsg_prefix='Schunk_Gripper')
 
         # Cameras and perception system
         camera_prefix = 'camera'
@@ -133,6 +302,14 @@ class GameStation():
 
         builder.ExportOutput(icp.GetOutputPort('icp_pcd_stack'),
             'icp_pcd_stack')
+
+        # Export "cheat" ports
+        builder.ExportOutput(self.scene_graph.get_query_output_port(), "query_object")
+        builder.ExportOutput(self.plant.get_contact_results_output_port(),
+                            "contact_results")
+        builder.ExportOutput(self.plant.get_state_output_port(),
+                            "plant_continuous_state")
+        builder.ExportOutput(self.plant.get_body_poses_output_port(), "body_poses")
 
         diagram = builder.Build()
         diagram.set_name("ManipulationStation")
@@ -162,14 +339,15 @@ class GameStation():
         """
         Call this in a ipynb window.  Shows the output of the rgb camera image.
         """
-        color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context)
+        # color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context)
+        color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.mut_station_context)
         plt.imshow(color_image.data)
 
     def get_processed_pcds(self):
         """
         Returns list of processed point clouds of pieces, and piece labels
         """
-        return self.station.GetOutputPort('icp_pcd_stack').Eval(self.station_context)
+        return self.station.GetOutputPort('icp_pcd_stack').Eval(self.mut_station_context)
 
     def _add_board(self):
         """
@@ -217,10 +395,10 @@ class GameStation():
         Move the pieces to the default positions (start of chess game).
         """
         board_piece_offset = 0.0
-        plant_context = self.plant.CreateDefaultContext()
+        self.plant_context = self.plant.CreateDefaultContext()
 
         board_frame = self.plant.GetFrameByName("board_body")
-        X_WorldBoard= board_frame.CalcPoseInWorld(plant_context)
+        X_WorldBoard= board_frame.CalcPoseInWorld(self.plant_context)
 
 
         for idx, location in self.idx_to_location.items():
@@ -238,6 +416,160 @@ class GameStation():
             X_BoardPiece = X_WorldBoard.multiply(X_BoardPiece)
             self.plant.SetDefaultFreeBodyPose(piece, X_BoardPiece)
 
+    def _connect_robot(self, builder, time_step, panda_prefix='panda',
+        wsg_prefix='Schunk_Gripper'):
+
+        for i in range(self.plant.num_model_instances()):
+            model_instance = ModelInstanceIndex(i)
+            model_instance_name = self.plant.GetModelInstanceName(model_instance)
+            # print('name: ', model_instance_name)
+            if model_instance_name.startswith(panda_prefix):
+                num_panda_positions = self.plant.num_positions(model_instance)
+
+                # I need a PassThrough system so that I can export the input port.
+                panda_position = builder.AddSystem(PassThrough(num_panda_positions))
+                builder.ExportInput(panda_position.get_input_port(),
+                                    model_instance_name + "_position")
+                builder.ExportOutput(panda_position.get_output_port(),
+                                    model_instance_name + "_position_commanded")
+                # Export the iiwa "state" outputs.
+                demux = builder.AddSystem(
+                    Demultiplexer(2 * num_panda_positions, num_panda_positions))
+                builder.Connect(self.plant.get_state_output_port(model_instance),
+                                demux.get_input_port())
+                builder.ExportOutput(demux.get_output_port(0),
+                                    model_instance_name + "_position_measured")
+                builder.ExportOutput(demux.get_output_port(1),
+                                    model_instance_name + "_velocity_estimated")
+                builder.ExportOutput(self.plant.get_state_output_port(model_instance),
+                                    model_instance_name + "_state_estimated")
+
+                # Make the plant for the iiwa controller to use.
+                controller_plant = MultibodyPlant(time_step=time_step)
+                controller_panda = AddPanda(controller_plant, collide=False)
+                controller_plant.Finalize()
+
+                kp = [500] * num_panda_positions
+                ki = [2] * num_panda_positions
+                kd = [30] * num_panda_positions
+
+                kp[-2] = 200
+                ki[-2] = 6
+                kd[-2] = 50
+
+                kp[-1] = 400
+                ki[-1] = 15
+                kd[-1] = 600
+
+
+                panda_controller = builder.AddSystem(
+                    InverseDynamicsController(controller_plant,
+                                            kp=kp,
+                                            ki=ki,
+                                            kd=kd,
+                                            has_reference_acceleration=False))
+                panda_controller.set_name(model_instance_name + "_controller")
+                builder.Connect(self.plant.get_state_output_port(model_instance),
+                                panda_controller.get_input_port_estimated_state())
+
+
+                # Add in the feed-forward torque
+                adder = builder.AddSystem(Adder(2, num_panda_positions))
+                builder.Connect(panda_controller.get_output_port_control(),
+                                adder.get_input_port(0))
+                # Use a PassThrough to make the port optional (it will provide zero
+                # values if not connected).
+                torque_passthrough = builder.AddSystem(
+                    PassThrough([0] * num_panda_positions))
+                builder.Connect(torque_passthrough.get_output_port(),
+                                adder.get_input_port(1))
+                builder.ExportInput(torque_passthrough.get_input_port(),
+                                    model_instance_name + "_feedforward_torque")
+                builder.Connect(adder.get_output_port(),
+                                self.plant.get_actuation_input_port(model_instance))
+
+                # Add discrete derivative to command velocities.
+                desired_state_from_position = builder.AddSystem(
+                    StateInterpolatorWithDiscreteDerivative(
+                        num_panda_positions,
+                        time_step,
+                        suppress_initial_transient=True))
+                desired_state_from_position.set_name(
+                    model_instance_name + "_desired_state_from_position")
+                builder.Connect(desired_state_from_position.get_output_port(),
+                                panda_controller.get_input_port_desired_state())
+                builder.Connect(panda_position.get_output_port(),
+                                desired_state_from_position.get_input_port())
+
+                # Export commanded torques.
+                builder.ExportOutput(adder.get_output_port(),
+                                    model_instance_name + "_torque_commanded")
+                builder.ExportOutput(adder.get_output_port(),
+                                    model_instance_name + "_torque_measured")
+
+                builder.ExportOutput(
+                    self.plant.get_generalized_contact_forces_output_port(
+                        model_instance), model_instance_name + "_torque_external")
+
+            elif model_instance_name.startswith(wsg_prefix):
+
+                # Wsg controller.
+                wsg_controller = builder.AddSystem(SchunkWsgPositionController())
+                wsg_controller.set_name(model_instance_name + "_controller")
+                builder.Connect(wsg_controller.get_generalized_force_output_port(),
+                                self.plant.get_actuation_input_port(model_instance))
+                builder.Connect(self.plant.get_state_output_port(model_instance),
+                                wsg_controller.get_state_input_port())
+                builder.ExportInput(
+                    wsg_controller.get_desired_position_input_port(),
+                    model_instance_name + "_position")
+                builder.ExportInput(wsg_controller.get_force_limit_input_port(),
+                                    model_instance_name + "_force_limit")
+                wsg_mbp_state_to_wsg_state = builder.AddSystem(
+                    MakeMultibodyStateToWsgStateSystem())
+
+                # wsg_mbp_force_to_wsg_force = builder.AddSystem(
+                #     MakeMultibodyForceToWsgForceSystem()
+                # )
+
+                builder.Connect(self.plant.get_state_output_port(model_instance),
+                                wsg_mbp_state_to_wsg_state.get_input_port())
+                # builder.Connect(plant.get_force_output_port(model_instance),
+                #                 wsg_mbp_force_to_wsg_force.get_input_port())
+                builder.ExportOutput(wsg_mbp_state_to_wsg_state.get_output_port(),
+                                    model_instance_name + "_state_measured")
+                # builder.ExportOutput(wsg_mbp_force_to_wsg_force.get_output_port(),
+                #                      model_instance_name + "_force_measured")
+
+    def make_move(self, start_loc: tuple[int], end_loc: tuple[int]) -> bool:
+        """
+        Move piece at start_loc (0-indexed) to location end_loc (0-indexed).
+
+        Args:
+            start_loc (tuple[int]): tuple of (x, y) location 0-indexed
+            end_loc (tuple[int]): tuple of (x, y) location 0-indexed
+
+        Returns:
+            bool: True if piece was moved, False otherwise
+        """
+        for idx in self.idx_to_location.keys():
+            piece = self.plant.GetBodyByName("piece_body", idx)
+            pose = self.plant.GetFreeBodyPose(self.mut_plant_context,
+                piece)
+
+            xyz = pose.translation()
+            if self.board.coord_to_location((xyz[0], xyz[1])) == start_loc:
+                new_x, new_y = self.board.get_xy_location_from_idx(end_loc[0], end_loc[1])
+                new_xyz = np.array([new_x, new_y, xyz[-1]])
+                new_pose = RigidTransform(pose.rotation(), new_xyz)
+                self.plant.SetFreeBodyPose(self.mut_plant_context,
+                    piece, new_pose)
+                print('Set pose!')
+                self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 0.02)
+                return True
+        print('Could not find piece at location!')
+        return False
+
     def set_arbitrary_board(self, num_pieces=10):
         """
         Move <num_pieces> pieces to random locations on the board.  Make sure
@@ -247,7 +579,8 @@ class GameStation():
             num_pieces (int, optional): number of pieces to show. Defaults to 10.
         """
         board_piece_offset = 0.0
-        plant_context = self.plant.GetMyMutableContextFromRoot(self.station_context)
+        # plant_context = self.plant.GetMyMutableContextFromRoot(self.station_context)
+        plant_context = self.mut_plant_context
 
         board_frame = self.plant.GetFrameByName("board_body")
         X_WorldBoard= board_frame.CalcPoseInWorld(plant_context)
@@ -424,3 +757,90 @@ def AddRgbdSensors(builder,
     }
 
     return ports
+
+
+def AddPanda(plant, collide=True):
+    """
+    Add panda urdf to plant.  Custom function by Ethan, may break.
+
+    Args:
+        plant (???): Plant created by drake.
+
+    Returns:
+        ???: Index of panda in plant.
+    """
+    if collide:
+        sdf_path = FindResourceOrThrow(
+        "drake/manipulation/models/"
+        # "franka_description/urdf/panda_arm_hand.urdf")
+        "franka_description/urdf/panda_arm.urdf")
+    else:
+        sdf_path = FindResourceOrThrow(
+        "drake/manipulation/models/"
+        # "franka_description/urdf/panda_arm_hand_no_collide.urdf")
+        "franka_description/urdf/panda_arm_no_collide.urdf")
+
+
+    parser = Parser(plant)
+    panda = parser.AddModelFromFile(sdf_path)
+
+    panda_base_frame = plant.GetFrameByName('panda_link0')
+    panda_transform = RigidTransform(
+    RollPitchYaw(np.asarray([0, 0, -np.pi/2])), p=[0, 0.45, 0])
+
+    plant.WeldFrames(plant.world_frame(), panda_base_frame, panda_transform)
+
+    # Set default positions:
+    # q0 = [0.0, 0.0, 0, -1.2, 0, 1.6, 0]
+    # q0 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    q0 = [0.0, 0, 0.0, -np.pi/2, 0.0, np.pi/2, np.pi/4]
+    index = 0
+    for joint_index in plant.GetJointIndices(panda):
+        joint = plant.get_mutable_joint(joint_index)
+        if isinstance(joint, RevoluteJoint):
+            joint.set_default_angle(q0[index])
+            index += 1
+
+    return panda
+
+
+def AddWsgPanda(plant,
+           panda_model_instance,
+           roll=np.pi / 4.0,
+           sphere=False):
+    parser = Parser(plant)
+    gripper = parser.AddModelFromFile(
+        FindResourceOrThrow(
+            "drake/manipulation/models/"
+            "wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf"))
+
+    # X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.09])
+    X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.04])
+    plant.WeldFrames(plant.GetFrameByName("panda_link8", panda_model_instance),
+                     plant.GetFrameByName("body", gripper), X_7G)
+    return gripper
+
+
+def AddPandaDifferentialIK(builder, plant, frame=None):
+    params = DifferentialInverseKinematicsParameters(plant.num_positions(),
+                                                     plant.num_velocities())
+    time_step = plant.time_step()
+    q0 = plant.GetPositions(plant.CreateDefaultContext())
+    params.set_nominal_joint_position(q0)
+    params.set_end_effector_angular_speed_limit(2)
+    params.set_end_effector_translational_velocity_limits([-2, -2, -2],
+                                                          [2, 2, 2])
+    panda_velocity_limits = np.array([1.4, 1.4, 1.7, 1.3, 2.2, 2.3, 2.3])
+    params.set_joint_velocity_limits(
+        (-panda_velocity_limits, panda_velocity_limits))
+    params.set_joint_centering_gain(10 * np.eye(7))
+    if frame is None:
+        frame = plant.GetFrameByName("body")
+    differential_ik = builder.AddSystem(
+        DifferentialInverseKinematicsIntegrator(
+            plant,
+            frame,
+            time_step,
+            params,
+            log_only_when_result_state_changes=True))
+    return differential_ik
