@@ -513,23 +513,19 @@ class GameStation():
                 controller_plant = MultibodyPlant(time_step=time_step)
                 controller_panda = AddPanda(controller_plant, collide=False)
                 # Frame for placing control at gripper fingers
+                # dif_ik_frame = controller_plant.AddFrame(FixedOffsetFrame('panda_gripper_frame',
+                #     controller_plant.GetFrameByName("panda_link8"),
+                #     RigidTransform([0.0, 0.02, 0.2])))
+
                 dif_ik_frame = controller_plant.AddFrame(FixedOffsetFrame('panda_gripper_frame',
                     controller_plant.GetFrameByName("panda_link8"),
-                    RigidTransform([0.0, 0.02, 0.2])))
+                    RigidTransform([0.0, 0.00, 0.2])))
 
                 controller_plant.Finalize()
 
-                kp = [500] * num_panda_positions
-                ki = [2] * num_panda_positions
-                kd = [30] * num_panda_positions
-
-                kp[-2] = 300
-                ki[-2] = 20
-                kd[-2] = 80
-
-                kp[-1] = 400
-                ki[-1] = 15
-                kd[-1] = 600
+                kp = [600, 500, 1000, 500, 1000, 3000, 400]
+                ki = [2, 2, 2, 2, 2, 50, 15]
+                kd = [100, 250, 30, 250, 100, 300, 600]
 
 
                 # Inverse dynamics
@@ -698,10 +694,10 @@ class GameStation():
         if end_grasp_coords is not None:
             self.robot_status.set_gripper_status('open')
             self.robot_status.set_pose_value(x = end_grasp_coords[0], y = end_grasp_coords[1], z = clear_z, yaw=yaw)
-            self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 15)
+            self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
 
             self.robot_status.set_pose_value(x = end_grasp_coords[0], y = end_grasp_coords[1], z = grab_z_offset + end_grasp_coords[2])
-            self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 6)
+            self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
 
             self.robot_status.set_gripper_status('close')
             self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
@@ -721,10 +717,10 @@ class GameStation():
 
         self.robot_status.set_gripper_status('open')
         self.robot_status.set_pose_value(x = start_grasp_coords[0], y = start_grasp_coords[1], z = clear_z, yaw=yaw)
-        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 15)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
 
         self.robot_status.set_pose_value(x = start_grasp_coords[0], y = start_grasp_coords[1], z = grab_z_offset + start_grasp_coords[2])
-        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 6)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
 
         self.robot_status.set_gripper_status('close')
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
@@ -745,7 +741,7 @@ class GameStation():
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
 
         self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z)
-        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 4)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 3)
 
         return True
 
@@ -983,7 +979,7 @@ def AddPanda(plant, collide=True):
     # Set default positions:
     # q0 = [0.0, 0.0, 0, -1.2, 0, 1.6, 0]
     # q0 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    q0 = [0.0, 0, 0.0, -np.pi/2, 0.0, 1.60, np.pi/4]  # Pitch slightly out helps grab
+    q0 = [0.0, 0, 0.0, -np.pi/2, 0.0, 1.60, np.pi/4]
     index = 0
     for joint_index in plant.GetJointIndices(panda):
         joint = plant.get_mutable_joint(joint_index)

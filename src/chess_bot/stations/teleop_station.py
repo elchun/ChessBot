@@ -362,10 +362,8 @@ def AddWsgPanda(plant,
            roll=np.pi / 4.0,
            sphere=False):
     parser = Parser(plant)
-    gripper = parser.AddModelFromFile(
-        FindResourceOrThrow(
-            "drake/manipulation/models/"
-            "wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf"))
+    gripper = parser.AddModelFromFile(osp.join(get_chessbot_src(), 'resources/models/',
+        "wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf"))
 
     # X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.09])
     X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.04])
@@ -378,7 +376,9 @@ def MakeChessManipulationStation(time_step=0.002,
                                  panda_prefix='panda',
                                  wsg_prefix='Schunk_Gripper',
                                  camera_prefix='camera',
-                                 meshcat=None):
+                                 meshcat=None,
+                                 add_board = True,
+                                 add_wsg = True):
     """
     Create Manipulation station with panda.  Hevaily based on MakeManipulationStation.
 
@@ -399,8 +399,10 @@ def MakeChessManipulationStation(time_step=0.002,
 
     parser = Parser(plant)
     panda_idx = AddPanda(plant)
-    AddWsgPanda(plant, ModelInstanceIndex(panda_idx))
-    board, board_idx, idx_to_location = AddBoard(plant, inspector)
+    if add_wsg:
+        AddWsgPanda(plant, ModelInstanceIndex(panda_idx))
+    if add_board:
+        board, board_idx, idx_to_location = AddBoard(plant, inspector)
 
     plant.set_stiction_tolerance(0.001)
 
@@ -441,8 +443,8 @@ def MakeChessManipulationStation(time_step=0.002,
 
 
     plant.Finalize()
-
-    SetBoard(plant, idx_to_location, board)
+    if add_board:
+        SetBoard(plant, idx_to_location, board)
 
     # print(plant)
 
@@ -475,18 +477,33 @@ def MakeChessManipulationStation(time_step=0.002,
             controller_plant = MultibodyPlant(time_step=time_step)
             controller_panda = AddPanda(controller_plant, collide=False)
             controller_plant.Finalize()
+            print(num_panda_positions)
 
-            kp = [500] * num_panda_positions
-            ki = [2] * num_panda_positions
-            kd = [30] * num_panda_positions
+            # kp = [500] * num_panda_positions
+            # ki = [2] * num_panda_positions
+            # kd = [30] * num_panda_positions
 
-            kp[-2] = 200
-            ki[-2] = 6
-            kd[-2] = 50
+            # There are 7 positions
+            kp = [600, 500, 1000, 500, 1000, 3000, 400]
+            ki = [2, 2, 2, 2, 2, 50, 15]
+            kd = [100, 250, 30, 250, 100, 300, 600]
 
-            kp[-1] = 400
-            ki[-1] = 15
-            kd[-1] = 600
+
+            # kp[-2] = 500
+            # ki[-2] = 6
+            # kd[-2] = 80
+
+            # kp[-1] = 400
+            # ki[-1] = 15
+            # kd[-1] = 600
+
+            # kp[-2] = 200
+            # ki[-2] = 6
+            # kd[-2] = 50
+
+            # kp[-1] = 400
+            # ki[-1] = 15
+            # kd[-1] = 600
 
 
             panda_controller = builder.AddSystem(
