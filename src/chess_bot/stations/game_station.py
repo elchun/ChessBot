@@ -193,8 +193,11 @@ class GameStation():
 
         self.mut_plant_context = diagram.GetMutableSubsystemContext(self.plant, context)
 
-        self.simulator.set_target_realtime_rate(1.0)
+        # self.simulator.set_target_realtime_rate(1.0)
+        self.simulator.set_target_realtime_rate(3.0)
         # self.simulator.set_publish_every_time_step(True)
+
+        self.grasp_yaw = None
 
         meshcat.AddButton("Stop Simulation", "Escape")
         print("Press Escape to stop the simulation")
@@ -205,45 +208,53 @@ class GameStation():
         prev_board = deepcopy(Board.starting_board_list)
         self.robot_status.set_pose_value(z=0.4)
         while True:
-            # Get player move (Player is always white)
-            player_start_pos, player_end_pos = self._get_player_move()
-            clear_output()
-            if not self.make_move(player_start_pos, player_end_pos):
-                print('Invalid move')
-                continue
+            move_correct = False
+            while not move_correct:
+                # Get player move (Player is always white)
+                player_start_pos, player_end_pos = self._get_player_move()
+                clear_output()
+                if not self.make_move(player_start_pos, player_end_pos):
+                    print('Invalid move')
+                    continue
 
-            # -- Run perception system to get pcds-- #
-            print('Getting robot move')
-            pcds, pieces = self.get_processed_pcds()
-            location_to_piece = self.extract_piece_locations(pcds, pieces)
+                # -- Run perception system to get pcds-- #
+                print('Getting robot move')
+                pcds, pieces = self.get_processed_pcds()
+                location_to_piece = self.extract_piece_locations(pcds, pieces)
 
-            current_board = [['  ' for i in range(8)] for j in range(8)]
-            for coord, piece in location_to_piece:
-                loc = self.board.coord_to_index(coord)
-                current_board[loc[0]][loc[1]] = piece
-                # res[7-loc[1]][loc[0]] = piece
+                current_board = [['  ' for i in range(8)] for j in range(8)]
+                for coord, piece in location_to_piece:
+                    loc = self.board.coord_to_index(coord)
+                    current_board[loc[0]][loc[1]] = piece
+                    # res[7-loc[1]][loc[0]] = piece
 
-            # -- Plot perception system -- #
-            print('-'*23)
-            print('Robot understanding of board:')
-            Board.print_board(current_board)
-            print('-'*23)
+                # -- Plot perception system -- #
+                print('-'*23)
+                print('Robot understanding of board:')
+                Board.print_board(current_board)
+                print('-'*23)
 
-            fig = multiplot(pcds)
-            fig_path = osp.join(get_chessbot_src(), 'demos/game_viz.html')
-            fig.write_html(fig_path)
-            iplot(fig)
+                fig = multiplot(pcds)
+                fig_path = osp.join(get_chessbot_src(), 'demos/game_viz.html')
+                fig.write_html(fig_path)
+                iplot(fig)
 
 
-            # -- Derive player move from perception -- #
-            derived_player_move = Board.get_move(prev_board, current_board)
+                # -- Derive player move from perception -- #
+                move_correct = False
 
-            print(f'Actual move: {player_start_pos} -> {player_end_pos}')
-            print(f'Predicted move: {derived_player_move[0]} -> {derived_player_move[1]}')
+                derived_player_move = Board.get_move(prev_board, current_board)
 
-            der_player_start_pos_str = Board.index_to_location(derived_player_move[0])
-            der_player_end_pos_str = Board.index_to_location(derived_player_move[1])
-            der_player_move = der_player_start_pos_str + der_player_end_pos_str
+                print(f'Actual move: {player_start_pos} -> {player_end_pos}')
+                print(f'Predicted move: {derived_player_move[0]} -> {derived_player_move[1]}')
+
+                der_player_start_pos_str = Board.index_to_location(derived_player_move[0])
+                der_player_end_pos_str = Board.index_to_location(derived_player_move[1])
+                der_player_move = der_player_start_pos_str + der_player_end_pos_str
+                move_correct = self.stockfish.is_move_correct(der_player_move)
+                if not move_correct:
+                    print('Invalid move, try again!')
+                    self.make_move(player_end_pos, player_start_pos)
 
             # Update internal boards
             self.stockfish.make_moves_from_current_position([der_player_move])
@@ -668,13 +679,13 @@ class GameStation():
         Returns:
             bool: True if piece was moved, False otherwise
         """
-        original_yaw = self.robot_status.get_pose_value('yaw')
-        yaw = original_yaw - np.pi / 4
+        if self.grasp_yaw is None:
+            self.grasp_yaw = self.robot_status.get_pose_value('yaw') + np.pi/4
         home_x, home_y, home_z = 0, 0, 0.4
 
         dump_x, dump_y = 0.4, 0
 
-        clear_z = 0.10
+        clear_z = 0.15
         grab_z_offset = -0.03
         place_z_offset = -0.02
 
@@ -698,7 +709,7 @@ class GameStation():
         if end_grasp_coords is not None:
             print('Target grasp location: ', end_grasp_coords)
             self.robot_status.set_gripper_status('open')
-            self.robot_status.set_pose_value(x = end_grasp_coords[0], y = end_grasp_coords[1], z = clear_z, yaw=yaw)
+            self.robot_status.set_pose_value(x = end_grasp_coords[0], y = end_grasp_coords[1], z = clear_z, yaw=self.grasp_yaw)
             self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
 
             self.robot_status.set_pose_value(x = end_grasp_coords[0], y = end_grasp_coords[1], z = grab_z_offset + end_grasp_coords[2])
@@ -720,14 +731,14 @@ class GameStation():
             self.robot_status.set_gripper_status('open')
             self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
 
-            self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z, yaw=original_yaw)
+            self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z)
             self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 3)
 
 
         print('Target grasp location: ', start_grasp_coords)
         print('non-adaptive grasp location: ', ref_grasp_x, ref_grasp_y)
         self.robot_status.set_gripper_status('open')
-        self.robot_status.set_pose_value(x = start_grasp_coords[0], y = start_grasp_coords[1], z = clear_z, yaw=yaw)
+        self.robot_status.set_pose_value(x = start_grasp_coords[0], y = start_grasp_coords[1], z = clear_z, yaw=self.grasp_yaw)
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
 
         self.robot_status.set_pose_value(x = start_grasp_coords[0], y = start_grasp_coords[1], z = grab_z_offset + start_grasp_coords[2])
@@ -755,8 +766,8 @@ class GameStation():
         self.robot_status.set_pose_value(x = place_x, y = place_y, z = clear_z)
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
 
-        self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z, yaw=original_yaw)
-        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 6)
+        self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z, yaw=self.grasp_yaw)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 3)
 
         return True
 
@@ -1007,7 +1018,7 @@ def AddPanda(plant, collide=True):
 
 def AddWsgPanda(plant,
            panda_model_instance,
-           roll=np.pi / 4.0,
+           roll=-np.pi / 4.0,
            sphere=False):
     parser = Parser(plant)
     gripper = parser.AddModelFromFile(
