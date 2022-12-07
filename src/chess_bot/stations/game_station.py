@@ -203,6 +203,7 @@ class GameStation():
 
     def play_game(self):
         prev_board = deepcopy(Board.starting_board_list)
+        self.robot_status.set_pose_value(z=0.4)
         while True:
             # Get player move (Player is always white)
             player_start_pos, player_end_pos = self._get_player_move()
@@ -523,9 +524,9 @@ class GameStation():
 
                 controller_plant.Finalize()
 
-                kp = [600, 500, 1000, 500, 1000, 3000, 400]
-                ki = [2, 2, 2, 2, 2, 50, 15]
-                kd = [100, 250, 30, 250, 100, 300, 600]
+                kp = [600, 3000, 1000, 3000, 1000, 3000, 400]
+                ki = [50, 50, 50, 50, 50, 50, 15]
+                kd = [100, 300, 30, 300, 100, 300, 600]
 
 
                 # Inverse dynamics
@@ -667,13 +668,15 @@ class GameStation():
         Returns:
             bool: True if piece was moved, False otherwise
         """
-        yaw = self.robot_status.get_pose_value('yaw') - np.pi / 4
+        original_yaw = self.robot_status.get_pose_value('yaw')
+        yaw = original_yaw - np.pi / 4
         home_x, home_y, home_z = 0, 0, 0.4
 
         dump_x, dump_y = 0.4, 0
 
         clear_z = 0.10
         grab_z_offset = -0.03
+        place_z_offset = -0.02
 
         grasp_locations = self._pcds_to_grasp_locations(pcds)
 
@@ -688,16 +691,22 @@ class GameStation():
                 end_grasp_coords = grasp_location
 
         place_x, place_y = self.board.get_xy_location_from_idx(end_loc[0], end_loc[1])
+        ref_grasp_x, ref_grasp_y = self.board.get_xy_location_from_idx(start_loc[0], start_loc[1])
 
         # We have a piece in the place we're trying to move to.
         # So we drop piece off the board
         if end_grasp_coords is not None:
+            print('Target grasp location: ', end_grasp_coords)
             self.robot_status.set_gripper_status('open')
             self.robot_status.set_pose_value(x = end_grasp_coords[0], y = end_grasp_coords[1], z = clear_z, yaw=yaw)
             self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
 
             self.robot_status.set_pose_value(x = end_grasp_coords[0], y = end_grasp_coords[1], z = grab_z_offset + end_grasp_coords[2])
             self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+
+            # Print grasp location
+            link_8_index = self.plant.GetBodyByName("panda_link8").index()
+            print('Estimated state: ', self.station.GetOutputPort('body_poses').Eval(self.mut_station_context)[link_8_index].translation())
 
             self.robot_status.set_gripper_status('close')
             self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
@@ -711,16 +720,22 @@ class GameStation():
             self.robot_status.set_gripper_status('open')
             self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
 
-            self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z)
+            self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z, yaw=original_yaw)
             self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 3)
 
 
+        print('Target grasp location: ', start_grasp_coords)
+        print('non-adaptive grasp location: ', ref_grasp_x, ref_grasp_y)
         self.robot_status.set_gripper_status('open')
         self.robot_status.set_pose_value(x = start_grasp_coords[0], y = start_grasp_coords[1], z = clear_z, yaw=yaw)
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
 
         self.robot_status.set_pose_value(x = start_grasp_coords[0], y = start_grasp_coords[1], z = grab_z_offset + start_grasp_coords[2])
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+
+        # Print grasp location
+        link_8_index = self.plant.GetBodyByName("panda_link8").index()
+        print('Estimated state: ', self.station.GetOutputPort('body_poses').Eval(self.mut_station_context)[link_8_index].translation())
 
         self.robot_status.set_gripper_status('close')
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
@@ -731,7 +746,7 @@ class GameStation():
         self.robot_status.set_pose_value(x = place_x, y = place_y, z = clear_z)
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2)
 
-        self.robot_status.set_pose_value(x = place_x, y = place_y, z = grab_z_offset + start_grasp_coords[2])
+        self.robot_status.set_pose_value(x = place_x, y = place_y, z = place_z_offset + start_grasp_coords[2])
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 3)
 
         self.robot_status.set_gripper_status('open')
@@ -740,8 +755,8 @@ class GameStation():
         self.robot_status.set_pose_value(x = place_x, y = place_y, z = clear_z)
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1)
 
-        self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z)
-        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 3)
+        self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z, yaw=original_yaw)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 6)
 
         return True
 
@@ -1017,7 +1032,7 @@ def AddPandaDifferentialIK(builder, plant, frame=None):
     params.set_end_effector_angular_speed_limit(2)
     params.set_end_effector_translational_velocity_limits([-2, -2, -2],
                                                           [2, 2, 2])
-    panda_velocity_limits = 0.2 * np.array([1.4, 1.4, 1.7, 1.3, 2.2, 2.3, 2.3])
+    panda_velocity_limits = 0.5 * np.array([1.4, 1.4, 1.7, 1.3, 2.2, 2.3, 2.3])
     params.set_joint_velocity_limits(
         (-panda_velocity_limits, panda_velocity_limits))
     params.set_joint_centering_gain(10 * np.eye(7))

@@ -483,10 +483,14 @@ def MakeChessManipulationStation(time_step=0.002,
             # ki = [2] * num_panda_positions
             # kd = [30] * num_panda_positions
 
-            # There are 7 positions
-            kp = [600, 500, 1000, 500, 1000, 3000, 400]
-            ki = [2, 2, 2, 2, 2, 50, 15]
-            kd = [100, 250, 30, 250, 100, 300, 600]
+            # There are 7 positions, right most is the end-effector
+            # kp = [600, 500, 1000, 500, 1000, 3000, 400]
+            # ki = [2, 2, 2, 2, 2, 50, 15]
+            # kd = [100, 250, 30, 250, 100, 300, 600]
+
+            kp = [600, 3000, 1000, 3000, 1000, 3000, 400]
+            ki = [50, 50, 50, 50, 50, 50, 15]
+            kd = [100, 300, 30, 300, 100, 300, 600]
 
 
             # kp[-2] = 500
