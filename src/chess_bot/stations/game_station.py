@@ -478,18 +478,54 @@ class GameStation():
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1.0)
 
     # -- Functions for gameplay -- #
-    def play_game(self):
+    def play_game(self, pre_move_list: list[str]=None):
+        # castle using the king coordinates
+
         prev_board = deepcopy(Board.starting_board_list)
         self.robot_status.set_pose_value(z=0.4)
+
+        if pre_move_list:
+            print('Setting from initial state!')
+        for move in pre_move_list:
+            start_pos_str = move[:2]
+            end_pos_str = move[2:]
+            start_pos = Board.location_to_coord(start_pos_str)
+            end_pos = Board.location_to_coord(end_pos_str)
+
+            # Check if we're castling
+            moves_made = self.move_castle(start_pos, end_pos, prev_board, use_robot=False)
+
+            if not moves_made:
+                self.make_move(start_pos, end_pos)
+                moves_made = [(start_pos, end_pos)]
+
+
+            for _start_pos, _end_pos in moves_made:
+                prev_board[_end_pos[0]][_end_pos[1]] = prev_board[_start_pos[0]][_start_pos[1]]
+                prev_board[_start_pos[0]][_start_pos[1]] = '  '
+
+            self.stockfish.make_moves_from_current_position([move])
+
+        if pre_move_list:
+            print('Done setting board!')
+
+
         while True:
             move_correct = False
             while not move_correct:
                 # Get player move (Player is always white)
-                player_start_pos, player_end_pos = self._get_player_move()
+                try:
+                    player_start_pos, player_end_pos = self._get_player_move()
+                except ValueError:
+                    print('Exiting!')
+                    return
                 clear_output()
-                if not self.make_move(player_start_pos, player_end_pos):
-                    print('Invalid move')
-                    continue
+
+                moves_made = self.move_castle(player_start_pos, player_end_pos, prev_board, use_robot=False)
+                if not moves_made:
+                    if not self.make_move(player_start_pos, player_end_pos):
+                        print('Invalid move')
+                        continue
 
                 # -- Run perception system to get pcds-- #
                 print('Getting robot move')
@@ -519,6 +555,7 @@ class GameStation():
                 # -- Derive player move from perception -- #
                 move_correct = False
 
+                # TODO: Update this to use castling move
                 derived_player_move = Board.get_move(prev_board, current_board)
 
                 print(f'Actual move: {player_start_pos} -> {player_end_pos}')
@@ -529,7 +566,8 @@ class GameStation():
                 der_player_move = der_player_start_pos_str + der_player_end_pos_str
                 move_correct = self.stockfish.is_move_correct(der_player_move)
                 if not move_correct:
-                    print('Invalid move, try again!')
+                    print(f'{der_player_move} is not correct, try again!')
+                    # Reset piece to orinal location
                     self.make_move(player_end_pos, player_start_pos)
 
             # Update internal boards
@@ -539,6 +577,16 @@ class GameStation():
 
 
             robot_move = self.stockfish.get_best_move()
+            if robot_move is None:
+                print('Human wins!')
+                ori_z = self.robot_status.get_pose_value('z')
+                ori_y = self.robot_status.get_pose_value('y')
+                self.robot_status.set_pose_value(z=0.1, y=-0.1)
+                self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+                print("(But I'll win the next one)")
+                self.robot_status.set_pose_value(z=ori_z, y=ori_y)
+                self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+                return
             self.stockfish.make_moves_from_current_position([robot_move])
 
             robot_start_pos_str = robot_move[:2]
@@ -546,12 +594,49 @@ class GameStation():
             robot_start_pos = Board.location_to_coord(robot_start_pos_str)
             robot_end_pos = Board.location_to_coord(robot_end_pos_str)
 
-            prev_board[robot_end_pos[0]][robot_end_pos[1]] = prev_board[robot_start_pos[0]][robot_start_pos[1]]
-            prev_board[robot_start_pos[0]][robot_start_pos[1]] = '  '
-
-
             print(f'Robot move: {robot_start_pos} -> {robot_end_pos}')
-            self.make_move_with_robot(robot_start_pos, robot_end_pos, pcds)
+
+            moves_made = self.move_castle(robot_start_pos, robot_end_pos, prev_board, use_robot=True, pcds=pcds)
+            if not moves_made:
+                moves_made = [(robot_start_pos, robot_end_pos)]
+                self.make_move_with_robot(robot_start_pos, robot_end_pos, pcds)
+
+            for robot_start_pos, robot_end_pos in moves_made:
+                prev_board[robot_end_pos[0]][robot_end_pos[1]] = prev_board[robot_start_pos[0]][robot_start_pos[1]]
+                prev_board[robot_start_pos[0]][robot_start_pos[1]] = '  '
+
+    def move_castle(self, start_pos, end_pos, prev_board, use_robot, pcds=None):
+        moves_to_make = []
+        e1 = (4, 0)
+        c1 = (2, 0)
+        g1 = (6, 0)
+
+        e8 = (4, 7)
+        c8 = (2, 7)
+        g8 = (6, 7)
+
+        if start_pos == e1 and end_pos == c1:
+            moves_to_make = ['e1c1', 'a1d1']
+        elif start_pos == e1 and end_pos == g1:
+            moves_to_make = ['e1g1', 'h1f1']
+        elif start_pos == e8 and end_pos == c8:
+            moves_to_make = ['e8c8', 'e8d8']
+        elif start_pos == e8 and end_pos == g8:
+            moves_to_make = ['e8g8', 'h8f8']
+
+        coord_moves_to_make = []
+        for i, move in enumerate(moves_to_make):
+            start_pos_str = move[:2]
+            end_pos_str = move[2:]
+            start_pos = Board.location_to_coord(start_pos_str)
+            end_pos = Board.location_to_coord(end_pos_str)
+            coord_moves_to_make.append((start_pos, end_pos))
+            if use_robot:
+                self.make_move_with_robot(start_pos, end_pos, pcds)
+            else:
+                self.make_move(start_pos, end_pos)
+
+        return coord_moves_to_make
 
     def _get_player_move(self):
         player_start_pos = input('Enter start move as (x, y)')

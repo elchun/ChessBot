@@ -235,8 +235,14 @@ class Board:
         Returns:
             tuple(tuple(int)): start_position as (x, y) and end_position as (x, y)
         """
+        # print('prev: ')
+        # Board.print_board(prev_board)
+        # print('current: ')
+        # Board.print_board(current_board)
         start_pos = None
         end_pos = None
+        start_pos_list = []
+        end_pos_list = []
         for x_idx in range(8):
             for y_idx in range(8):
                 old_piece = prev_board[x_idx][y_idx]
@@ -245,15 +251,31 @@ class Board:
                     # Case 1, piece left
                     if new_piece == '  ':
                         start_pos = (x_idx, y_idx)
+                        start_pos_list.append(start_pos)
 
+                    # Case 2: piece landed
                     elif old_piece[-1] != new_piece[-1]:
                         end_pos = (x_idx, y_idx)
+                        end_pos_list.append(end_pos)
 
                     else:
                         raise ValueError('Could not determine move!')
 
         assert start_pos is not None, 'Could not find start position'
-        assert end_pos is not None, 'Could not find end positoin'
+        assert end_pos is not None, 'Could not find end position'
+
+        # Check for castle --> Return move of king
+        if len(start_pos_list) == 2 and len(end_pos_list) == 2:
+            if (4, 0) in start_pos_list:
+                start_pos = (4, 0)
+            elif (4, 7) in start_pos:
+                start_pos = (4, 7)
+
+            for possible_end_pos in [(2, 0), (6, 0), (2, 7), (6, 7)]:
+                if possible_end_pos in end_pos_list:
+                    end_pos = possible_end_pos
+                    break
+
         return start_pos, end_pos
 
     @staticmethod
