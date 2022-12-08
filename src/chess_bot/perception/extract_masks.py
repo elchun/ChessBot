@@ -1,7 +1,10 @@
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import random
 import numpy as np
 from PIL import Image
 import os.path as osp
+import io
 
 import torch
 import torchvision
@@ -34,6 +37,11 @@ class ExtractMasks(LeafSystem):
             'masked_depth_image',
             lambda: AbstractValue.Make([np.ndarray]),
             self.get_masks)
+
+        self.DeclareAbstractOutputPort(
+            'raw_prediction',
+            lambda: AbstractValue.Make([torch.Tensor, np.ndarray]),
+            self.get_raw_prediction)
 
         self.pieces = [
             'BB', # : 'Bishop_B.urdf',
@@ -68,6 +76,7 @@ class ExtractMasks(LeafSystem):
             torch.load(model_file, map_location=self.device))
         self.model.eval()
         self.model.to(self.device)
+        self.prev_prediction = None
 
     def get_piece_from_label(self, label):
         return self.pieces[label - 1]
@@ -105,6 +114,8 @@ class ExtractMasks(LeafSystem):
         with torch.no_grad():
             prediction = self.model([Tf.to_tensor(color_image).to(self.device)])
 
+        self.prev_prediction = prediction
+
         labels = list(prediction[0]['labels'].cpu().detach().numpy())
         scores = list(prediction[0]['scores'].cpu().detach().numpy())
         masks = prediction[0]['masks'].cpu().detach().numpy()
@@ -121,3 +132,59 @@ class ExtractMasks(LeafSystem):
             predicted_pieces.append(self.get_piece_from_label(labels[i]))
 
         output.set_value([np.stack(masked_depth_imgs, axis=0), predicted_pieces])
+
+    def get_raw_prediction(self, context, output):
+        img = self.GetInputPort('rgb_image').Eval(context).data
+        img = Image.fromarray(np.uint8(img)).convert('RGB')
+        # Only recalculate prediction when getting masks
+        if self.prev_prediction is None:
+            with torch.no_grad():
+                prediction = self.model([Tf.to_tensor(img).to(self.device)])
+        else:
+            prediction = self.prev_prediction
+        output.set_value((prediction, img))
+        # thresh = 0.97
+        # img_np = np.array(img)
+        # fig, ax = plt.subplots(1, figsize=(12,9))
+        # ax.imshow(img_np)
+
+        # cmap = plt.get_cmap('tab20b')
+        # colors = [cmap(i) for i in np.linspace(0, 1, 60)]
+
+        # num_instances = prediction[0]['boxes'].shape[0]
+        # bbox_colors = random.sample(colors, num_instances)
+        # boxes = prediction[0]['boxes'].cpu().numpy()
+        # labels = prediction[0]['labels'].cpu().numpy()
+        # scores = prediction[0]['scores'].cpu().detach().numpy()
+
+
+        # for i in range(num_instances):
+        #     if scores[i] < thresh:
+        #         continue
+        #     color = bbox_colors[i]
+        #     bb = boxes[i,:]
+        #     bbox = patches.Rectangle((bb[0], bb[1]), bb[2]-bb[0], bb[3]-bb[1],
+        #             linewidth=2, edgecolor=color, facecolor='none')
+        #     ax.add_patch(bbox)
+        #     plt.text(bb[0], bb[1], s=self.get_piece_from_label(labels[i]),
+        #             color='white', verticalalignment='top',
+        #             bbox={'color': color, 'pad': 0})
+        #     plt.text(bb[0], bb[3], s=str(f'{scores[i]:.3}'),
+        #             color='white', verticalalignment='bottom',
+        #             bbox={'color': color, 'pad': 0})
+
+        # plt.axis('off');
+        # plt.show()
+        # fig.canvas.draw()
+
+        # fig.savefig('/tmp/chess_masks.png')
+
+        # # https://stackoverflow.com/questions/7821518/matplotlib-save-plot-to-numpy-array
+        # io_buf = io.BytesIO()
+        # fig.savefig(io_buf, format='raw')
+        # io_buf.seek(0)
+        # img_arr = np.reshape(np.frombuffer(io_buf.getvalue(), dtype=np.uint8),
+        #                     newshape=(int(fig.bbox.bounds[3]), int(fig.bbox.bounds[2]), -1))
+        # io_buf.close()
+
+        # output.set_value('/tmp/chess_masks.png')

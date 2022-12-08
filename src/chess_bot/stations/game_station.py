@@ -3,78 +3,37 @@
 from IPython.display import clear_output
 from copy import deepcopy
 
-import argparse
-import json
 import matplotlib.pyplot as plt
-import multiprocessing
+import matplotlib.patches as patches
 import numpy as np
-from PIL import Image
-import os
 import os.path as osp
-import sys
-import shutil
-import warnings
 import random
 
-import torch
-import torchvision
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torchvision.models.detection.mask_rcnn import MaskRCNNPredictor
-from torchvision.models.detection import MaskRCNN_ResNet50_FPN_Weights
-import torchvision.transforms.functional as Tf
 
-from scipy import ndimage
-
-from plotly.offline import init_notebook_mode, iplot
+from plotly.offline import iplot
 
 from stockfish import Stockfish
 
 from pydrake.all import (
-    AddMultibodyPlantSceneGraph,
-    DiagramBuilder,
-    FindResourceOrThrow,
-    Parser,
     RandomGenerator,
-    RigidTransform,
-    Role,
-    RollPitchYaw,
     Simulator,
-    UniformlyRandomRotationMatrix,
-    MakeRenderEngineVtk,
-    RenderEngineVtkParams,
-    RenderCameraCore,
-    DepthRenderCamera,
-    PointCloud,
-    BaseField,
-    Fields,
-    FixedOffsetFrame
-)
-
-from pydrake.all import (
-    AbstractValue, Adder, AddMultibodyPlantSceneGraph, BaseField,
-    Box, CameraInfo, ClippingRange, CoulombFriction, Cylinder, Demultiplexer,
-    DepthImageToPointCloud, DepthRange, DepthRenderCamera, DiagramBuilder,
-    FindResourceOrThrow, GeometryInstance, InverseDynamicsController,
-    LeafSystem, LoadModelDirectivesFromString,
-    MakeMultibodyStateToWsgStateSystem, MakeMultibodyForceToWsgForceSystem,
-    MakePhongIllustrationProperties,
-    MakeRenderEngineVtk, ModelInstanceIndex, MultibodyPlant, Parser,
-    PassThrough, PrismaticJoint, ProcessModelDirectives, RenderCameraCore,
-    RenderEngineVtkParams, RevoluteJoint, Rgba, RgbdSensor, RigidTransform,
-    RollPitchYaw, RotationMatrix, SchunkWsgPositionController, SpatialInertia,
-    Sphere, StateInterpolatorWithDiscreteDerivative, UnitInertia,
-    MeshcatPointCloudVisualizer, ConstantValueSource, Role,
-    PidController)
-
-from pydrake.systems.framework import (DiagramBuilder, EventStatus, LeafSystem,
-                                       PublishEvent, VectorSystem)
-
-from pydrake.geometry import (Cylinder, MeshcatVisualizer,
-                              MeshcatVisualizerParams, Rgba, Role, Sphere)
-
-from pydrake.manipulation.planner import (
-    DifferentialInverseKinematicsIntegrator,
-    DifferentialInverseKinematicsParameters)
+    FixedOffsetFrame,
+    Adder,
+    AddMultibodyPlantSceneGraph,
+    Demultiplexer,
+    DiagramBuilder,
+    InverseDynamicsController,
+    MakeMultibodyStateToWsgStateSystem,
+    ModelInstanceIndex,
+    MultibodyPlant,
+    Parser,
+    PassThrough,
+    RigidTransform,
+    RollPitchYaw,
+    SchunkWsgPositionController,
+    StateInterpolatorWithDiscreteDerivative,
+    Role,
+    MeshcatVisualizer)
 
 from chess_bot.utils.utils import colorize_labels
 
@@ -82,11 +41,10 @@ from chess_bot.resources.board import Board
 from chess_bot.utils.path_util import get_chessbot_src
 from chess_bot.utils.meshcat_utils import RobotMeshcatPoseSliders, RobotWsgButtonPanda, RobotStatus
 
-from chess_bot.perception.extract_masks import ExtractMasks
-from chess_bot.perception.create_pointclouds import CreatePointclouds
 from chess_bot.perception.icp_system import ICPSystem
 
 from chess_bot.utils.plotly_utils import multiplot
+from chess_bot.utils.game_station_utils import AddRgbdSensors, AddPanda, AddWsgPanda, AddPandaDifferentialIK
 
 
 rng = np.random.default_rng()  # this is for python
@@ -95,7 +53,7 @@ generator = RandomGenerator(rng.integers(1000))  # for c++
 class GameStation():
     def __init__(self, meshcat):
         """
-        Class that simulates a chess board to generate data for Mask R-CNN
+        Class that simulates a chess board to play chess against a robot.
         """
         try:
             self.stockfish = Stockfish('/opt/homebrew/bin/stockfish')
@@ -204,122 +162,6 @@ class GameStation():
 
         self.simulator.AdvanceTo(0.01)
 
-    def play_game(self):
-        prev_board = deepcopy(Board.starting_board_list)
-        self.robot_status.set_pose_value(z=0.4)
-        while True:
-            move_correct = False
-            while not move_correct:
-                # Get player move (Player is always white)
-                player_start_pos, player_end_pos = self._get_player_move()
-                clear_output()
-                if not self.make_move(player_start_pos, player_end_pos):
-                    print('Invalid move')
-                    continue
-
-                # -- Run perception system to get pcds-- #
-                print('Getting robot move')
-                pcds, pieces = self.get_processed_pcds()
-                location_to_piece = self.extract_piece_locations(pcds, pieces)
-
-                current_board = [['  ' for i in range(8)] for j in range(8)]
-                for coord, piece in location_to_piece:
-                    loc = self.board.coord_to_index(coord)
-                    current_board[loc[0]][loc[1]] = piece
-                    # res[7-loc[1]][loc[0]] = piece
-
-                # -- Plot perception system -- #
-                print('-'*23)
-                print('Robot understanding of board:')
-                Board.print_board(current_board)
-                print('-'*23)
-
-                fig = multiplot(pcds)
-                fig_path = osp.join(get_chessbot_src(), 'demos/game_viz.html')
-                fig.write_html(fig_path)
-                iplot(fig)
-
-
-                # -- Derive player move from perception -- #
-                move_correct = False
-
-                derived_player_move = Board.get_move(prev_board, current_board)
-
-                print(f'Actual move: {player_start_pos} -> {player_end_pos}')
-                print(f'Predicted move: {derived_player_move[0]} -> {derived_player_move[1]}')
-
-                der_player_start_pos_str = Board.index_to_location(derived_player_move[0])
-                der_player_end_pos_str = Board.index_to_location(derived_player_move[1])
-                der_player_move = der_player_start_pos_str + der_player_end_pos_str
-                move_correct = self.stockfish.is_move_correct(der_player_move)
-                if not move_correct:
-                    print('Invalid move, try again!')
-                    self.make_move(player_end_pos, player_start_pos)
-
-            # Update internal boards
-            self.stockfish.make_moves_from_current_position([der_player_move])
-            prev_board[derived_player_move[1][0]][derived_player_move[1][1]] = prev_board[derived_player_move[0][0]][derived_player_move[0][1]]
-            prev_board[derived_player_move[0][0]][derived_player_move[0][1]] = '  '
-
-
-            robot_move = self.stockfish.get_best_move()
-            self.stockfish.make_moves_from_current_position([robot_move])
-
-            robot_start_pos_str = robot_move[:2]
-            robot_end_pos_str = robot_move[2:]
-            robot_start_pos = Board.location_to_coord(robot_start_pos_str)
-            robot_end_pos = Board.location_to_coord(robot_end_pos_str)
-
-            prev_board[robot_end_pos[0]][robot_end_pos[1]] = prev_board[robot_start_pos[0]][robot_start_pos[1]]
-            prev_board[robot_start_pos[0]][robot_start_pos[1]] = '  '
-
-
-            print(f'Robot move: {robot_start_pos} -> {robot_end_pos}')
-            self.make_move_with_robot(robot_start_pos, robot_end_pos, pcds)
-
-
-    def _get_player_move(self):
-        player_start_pos = input('Enter start move as (x, y)')
-        player_end_pos = input('Enter end move as (x, y)')
-
-        player_start_pos = player_start_pos.strip('()')
-        player_start_pos = tuple([int(i) for i in player_start_pos.split(',')])
-
-        player_end_pos = player_end_pos.strip('()')
-        player_end_pos = tuple([int(i) for i in player_end_pos.split(',')])
-
-        return player_start_pos, player_end_pos
-
-
-    def extract_piece_locations(self, pcds: list[np.ndarray], pieces: list[str]) -> list:
-        """
-        Get piece locations from raw pointclouds.  list of (location, piece) pairs
-
-        Args:
-            pcds (list(np.ndarray)): list of pcds in N x 3 format
-            pieces (list(str)): list of predicted piece types
-
-        Returns:
-            list: (location, piece) tuples where location is (x, y) position in meters
-        """
-        res = []
-        for i, pcd in enumerate(pcds):
-            mean_loc = list(np.mean(pcd[:, :2], axis=0))
-            res.append((mean_loc, pieces[i]))
-        return res
-
-    def run_teleop(self):
-        self.meshcat.AddButton("Stop Simulation", "Escape")
-        while self.meshcat.GetButtonClicks("Stop Simulation") < 1:
-            self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2.0)
-
-        sim_context = self.simulator.get_context()
-
-
-        self.meshcat.DeleteButton("Stop Simulation")
-        self.station.Publish(self.station_context)
-
-
     def make_station(self, time_step=0.002):
         """
         Helper function to create the diagram for a chess board
@@ -333,7 +175,7 @@ class GameStation():
         builder = DiagramBuilder()
 
         self.plant, self.scene_graph = AddMultibodyPlantSceneGraph(builder,
-                                                     time_step=time_step)
+                                                    time_step=time_step)
 
         self.inspector = self.scene_graph.model_inspector()
         self.parser = Parser(self.plant)
@@ -391,40 +233,6 @@ class GameStation():
         diagram = builder.Build()
         diagram.set_name("ManipulationStation")
         return diagram
-
-    def read_rgbd_sensor(self):
-        """
-        Get color, depth, and label images for the board
-
-        Returns:
-            tuple(array): color image, depth image, label image
-        """
-        color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context).data
-        depth_image = self.station.GetOutputPort("camera_depth_image").Eval(self.station_context).data
-        label_image = self.station.GetOutputPort("camera_depth_image").Eval(self.station_context).data
-        return color_image, depth_image, label_image
-
-    def show_label_image(self):
-        """
-        Call this in a ipynb window.  Shows the output of the mask camera image.
-        """
-        label_image = self.station.GetOutputPort("camera_label_image").Eval(self.station_context)
-        plt.imshow(colorize_labels(label_image.data))
-        print('Num Unique values: ', len(np.unique(label_image.data)))
-
-    def show_rgb_image(self):
-        """
-        Call this in a ipynb window.  Shows the output of the rgb camera image.
-        """
-        # color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context)
-        color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.mut_station_context)
-        plt.imshow(color_image.data)
-
-    def get_processed_pcds(self):
-        """
-        Returns list of processed point clouds of pieces, and piece labels
-        """
-        return self.station.GetOutputPort('icp_pcd_stack').Eval(self.mut_station_context)
 
     def _add_board(self):
         """
@@ -620,6 +428,262 @@ class GameStation():
                 # builder.ExportOutput(wsg_mbp_force_to_wsg_force.get_output_port(),
                 #                      model_instance_name + "_force_measured")
 
+    def set_arbitrary_board(self, num_pieces=10):
+        """
+        Move <num_pieces> pieces to random locations on the board.  Make sure
+        that no pieces are on top of eachother.
+
+        Args:
+            num_pieces (int, optional): number of pieces to show. Defaults to 10.
+        """
+        board_piece_offset = 0.0
+        # plant_context = self.plant.GetMyMutableContextFromRoot(self.station_context)
+        plant_context = self.mut_plant_context
+
+        board_frame = self.plant.GetFrameByName("board_body")
+        X_WorldBoard= board_frame.CalcPoseInWorld(plant_context)
+
+        locations = set()  # set of (x, y) tuples
+
+        indices = list(self.idx_to_location.keys())
+        random.shuffle(indices)
+
+        for idx in indices[:num_pieces]:
+            piece = self.plant.GetBodyByName("piece_body", idx)
+            # benchy = plant.GetBodyByName("benchy_body", name)
+
+            # Find a position that is not currently occupied
+            while True:
+                x = np.random.randint(0, 8)
+                y = np.random.randint(0, 8)
+                if (x, y) not in locations:
+                    break
+            locations.add((x, y))
+            # print('x: ', x, 'y: ', y)
+            x, y = self.board.get_xy_location_from_idx(x, y)
+            yaw = np.random.random() * 2 * np.pi
+            X_BoardPiece = RigidTransform(
+                RollPitchYaw(np.asarray([0, 0, yaw])), p=[x, y, board_piece_offset])
+            X_BoardPiece = X_WorldBoard.multiply(X_BoardPiece)
+            self.plant.SetFreeBodyPose(plant_context, piece, X_BoardPiece)
+
+        # Put pieces off screen
+        for i, idx in enumerate(indices[num_pieces:]):
+            piece = self.plant.GetBodyByName("piece_body", idx)
+            x, y = 1, 1 + i
+            X_BoardPiece = RigidTransform(
+                RollPitchYaw(np.asarray([0, 0, 0])), p=[x, y, board_piece_offset])
+            X_BoardPiece = X_WorldBoard.multiply(X_BoardPiece)
+            self.plant.SetFreeBodyPose(plant_context, piece, X_BoardPiece)
+        self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1.0)
+
+    # -- Functions for gameplay -- #
+    def play_game(self):
+        prev_board = deepcopy(Board.starting_board_list)
+        self.robot_status.set_pose_value(z=0.4)
+        while True:
+            move_correct = False
+            while not move_correct:
+                # Get player move (Player is always white)
+                player_start_pos, player_end_pos = self._get_player_move()
+                clear_output()
+                if not self.make_move(player_start_pos, player_end_pos):
+                    print('Invalid move')
+                    continue
+
+                # -- Run perception system to get pcds-- #
+                print('Getting robot move')
+                pcds, pieces = self.get_processed_pcds()
+                location_to_piece = self.extract_piece_locations(pcds, pieces)
+
+                current_board = [['  ' for i in range(8)] for j in range(8)]
+                for coord, piece in location_to_piece:
+                    loc = self.board.coord_to_index(coord)
+                    current_board[loc[0]][loc[1]] = piece
+                    # res[7-loc[1]][loc[0]] = piece
+
+                # -- Plot perception system -- #
+                print('-'*23)
+                print('Robot understanding of board:')
+                Board.print_board(current_board)
+                print('-'*23)
+
+                fig = multiplot(pcds)
+                fig_path = osp.join(get_chessbot_src(), 'demos/game_viz.html')
+                fig.write_html(fig_path)
+                iplot(fig)
+
+                self.show_mask_labeled_image()
+
+
+                # -- Derive player move from perception -- #
+                move_correct = False
+
+                derived_player_move = Board.get_move(prev_board, current_board)
+
+                print(f'Actual move: {player_start_pos} -> {player_end_pos}')
+                print(f'Predicted move: {derived_player_move[0]} -> {derived_player_move[1]}')
+
+                der_player_start_pos_str = Board.index_to_location(derived_player_move[0])
+                der_player_end_pos_str = Board.index_to_location(derived_player_move[1])
+                der_player_move = der_player_start_pos_str + der_player_end_pos_str
+                move_correct = self.stockfish.is_move_correct(der_player_move)
+                if not move_correct:
+                    print('Invalid move, try again!')
+                    self.make_move(player_end_pos, player_start_pos)
+
+            # Update internal boards
+            self.stockfish.make_moves_from_current_position([der_player_move])
+            prev_board[derived_player_move[1][0]][derived_player_move[1][1]] = prev_board[derived_player_move[0][0]][derived_player_move[0][1]]
+            prev_board[derived_player_move[0][0]][derived_player_move[0][1]] = '  '
+
+
+            robot_move = self.stockfish.get_best_move()
+            self.stockfish.make_moves_from_current_position([robot_move])
+
+            robot_start_pos_str = robot_move[:2]
+            robot_end_pos_str = robot_move[2:]
+            robot_start_pos = Board.location_to_coord(robot_start_pos_str)
+            robot_end_pos = Board.location_to_coord(robot_end_pos_str)
+
+            prev_board[robot_end_pos[0]][robot_end_pos[1]] = prev_board[robot_start_pos[0]][robot_start_pos[1]]
+            prev_board[robot_start_pos[0]][robot_start_pos[1]] = '  '
+
+
+            print(f'Robot move: {robot_start_pos} -> {robot_end_pos}')
+            self.make_move_with_robot(robot_start_pos, robot_end_pos, pcds)
+
+    def _get_player_move(self):
+        player_start_pos = input('Enter start move as (x, y)')
+        player_end_pos = input('Enter end move as (x, y)')
+
+        player_start_pos = player_start_pos.strip('()')
+        player_start_pos = tuple([int(i) for i in player_start_pos.split(',')])
+
+        player_end_pos = player_end_pos.strip('()')
+        player_end_pos = tuple([int(i) for i in player_end_pos.split(',')])
+
+        return player_start_pos, player_end_pos
+
+    def extract_piece_locations(self, pcds: list[np.ndarray], pieces: list[str]) -> list:
+        """
+        Get piece locations from raw pointclouds.  list of (location, piece) pairs
+
+        Args:
+            pcds (list(np.ndarray)): list of pcds in N x 3 format
+            pieces (list(str)): list of predicted piece types
+
+        Returns:
+            list: (location, piece) tuples where location is (x, y) position in meters
+        """
+        res = []
+        for i, pcd in enumerate(pcds):
+            mean_loc = list(np.mean(pcd[:, :2], axis=0))
+            res.append((mean_loc, pieces[i]))
+        return res
+
+    def run_teleop(self):
+        self.meshcat.AddButton("Stop Simulation", "Escape")
+        while self.meshcat.GetButtonClicks("Stop Simulation") < 1:
+            self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2.0)
+
+        sim_context = self.simulator.get_context()
+
+
+        self.meshcat.DeleteButton("Stop Simulation")
+        self.station.Publish(self.station_context)
+
+    def read_rgbd_sensor(self):
+        """
+        Get color, depth, and label images for the board
+
+        Returns:
+            tuple(array): color image, depth image, label image
+        """
+        color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context).data
+        depth_image = self.station.GetOutputPort("camera_depth_image").Eval(self.station_context).data
+        label_image = self.station.GetOutputPort("camera_depth_image").Eval(self.station_context).data
+        return color_image, depth_image, label_image
+
+    def show_label_image(self):
+        """
+        Call this in a ipynb window.  Shows the output of the mask camera image.
+        """
+        label_image = self.station.GetOutputPort("camera_label_image").Eval(self.station_context)
+        plt.imshow(colorize_labels(label_image.data))
+        print('Num Unique values: ', len(np.unique(label_image.data)))
+
+    def show_mask_labeled_image(self):
+
+        pieces = [
+            'BB', # : 'Bishop_B.urdf',
+            'BW', # : 'Bishop_W.urdf',
+
+            'KB', # : 'King_B.urdf',
+            'KW', # : 'King_W.urdf',
+
+            'NB', # : 'Knight_B.urdf',
+            'NW', # : 'Knight_W.urdf',
+
+            'PB', # : 'Pawn_B.urdf',
+            'PW', # : 'Pawn_W.urdf',
+
+            'QB', # : 'Queen_B.urdf',
+            'QW', # : 'Queen_W.urdf',
+
+            'RB', # : 'Rook_B.urdf',
+            'RW', # : 'Rook_W.urdf'
+        ]
+
+        prediction, img = self.station.GetOutputPort('camera_raw_prediction').Eval(self.mut_station_context)
+        thresh = 0.97
+        img_np = np.array(img)
+        fig, ax = plt.subplots(1, figsize=(12,9))
+        ax.imshow(img_np)
+
+        cmap = plt.get_cmap('tab20b')
+        colors = [cmap(i) for i in np.linspace(0, 1, 60)]
+
+        num_instances = prediction[0]['boxes'].shape[0]
+        bbox_colors = random.sample(colors, num_instances)
+        boxes = prediction[0]['boxes'].cpu().numpy()
+        labels = prediction[0]['labels'].cpu().numpy()
+        scores = prediction[0]['scores'].cpu().detach().numpy()
+
+        for i in range(num_instances):
+            if scores[i] < thresh:
+                continue
+            color = bbox_colors[i]
+            bb = boxes[i,:]
+            bbox = patches.Rectangle((bb[0], bb[1]), bb[2]-bb[0], bb[3]-bb[1],
+                    linewidth=2, edgecolor=color, facecolor='none')
+            ax.add_patch(bbox)
+            plt.text(bb[0], bb[1], pieces[labels[i] - 1],
+                    color='white', verticalalignment='top',
+                    bbox={'color': color, 'pad': 0})
+            plt.text(bb[0], bb[3], s=str(f'{scores[i]:.3}'),
+                    color='white', verticalalignment='bottom',
+                    bbox={'color': color, 'pad': 0})
+
+        plt.axis('off');
+        plt.show()
+
+
+    def show_rgb_image(self):
+        """
+        Call this in a ipynb window.  Shows the output of the rgb camera image.
+        """
+        # color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.station_context)
+        color_image = self.station.GetOutputPort("camera_rgb_image").Eval(self.mut_station_context)
+        plt.imshow(color_image.data)
+
+
+    def get_processed_pcds(self):
+        """
+        Returns list of processed point clouds of pieces, and piece labels
+        """
+        return self.station.GetOutputPort('icp_pcd_stack').Eval(self.mut_station_context)
+
     def make_move(self, start_loc: tuple[int], end_loc: tuple[int]) -> bool:
         """
         Move piece at start_loc (0-indexed) to location end_loc (0-indexed).
@@ -771,7 +835,6 @@ class GameStation():
 
         return True
 
-
     def _pcds_to_grasp_locations(self, pcds: list[np.ndarray]) -> list[np.ndarray]:
         grasp_locations = []
         for pcd in pcds:
@@ -780,371 +843,3 @@ class GameStation():
             grasp_locations.append(grasp_loc)
 
         return grasp_locations
-
-
-    def set_arbitrary_board(self, num_pieces=10):
-        """
-        Move <num_pieces> pieces to random locations on the board.  Make sure
-        that no pieces are on top of eachother.
-
-        Args:
-            num_pieces (int, optional): number of pieces to show. Defaults to 10.
-        """
-        board_piece_offset = 0.0
-        # plant_context = self.plant.GetMyMutableContextFromRoot(self.station_context)
-        plant_context = self.mut_plant_context
-
-        board_frame = self.plant.GetFrameByName("board_body")
-        X_WorldBoard= board_frame.CalcPoseInWorld(plant_context)
-
-        locations = set()  # set of (x, y) tuples
-
-        indices = list(self.idx_to_location.keys())
-        random.shuffle(indices)
-
-        for idx in indices[:num_pieces]:
-            piece = self.plant.GetBodyByName("piece_body", idx)
-            # benchy = plant.GetBodyByName("benchy_body", name)
-
-            # Find a position that is not currently occupied
-            while True:
-                x = np.random.randint(0, 8)
-                y = np.random.randint(0, 8)
-                if (x, y) not in locations:
-                    break
-            locations.add((x, y))
-            # print('x: ', x, 'y: ', y)
-            x, y = self.board.get_xy_location_from_idx(x, y)
-            yaw = np.random.random() * 2 * np.pi
-            X_BoardPiece = RigidTransform(
-                RollPitchYaw(np.asarray([0, 0, yaw])), p=[x, y, board_piece_offset])
-            X_BoardPiece = X_WorldBoard.multiply(X_BoardPiece)
-            self.plant.SetFreeBodyPose(plant_context, piece, X_BoardPiece)
-
-        # Put pieces off screen
-        for i, idx in enumerate(indices[num_pieces:]):
-            piece = self.plant.GetBodyByName("piece_body", idx)
-            x, y = 1, 1 + i
-            X_BoardPiece = RigidTransform(
-                RollPitchYaw(np.asarray([0, 0, 0])), p=[x, y, board_piece_offset])
-            X_BoardPiece = X_WorldBoard.multiply(X_BoardPiece)
-            self.plant.SetFreeBodyPose(plant_context, piece, X_BoardPiece)
-        # self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 2.0)
-        # print('sim_time: ', self.simulator.get_context().get_time())
-
-
-def AddRgbdSensors(builder,
-                   plant,
-                   scene_graph,
-                   also_add_point_clouds=True,
-                   model_instance_prefix="camera",
-                   depth_camera=None,
-                   renderer=None):
-    """
-    Adds a RgbdSensor to the first body in the plant for every model instance
-    with a name starting with model_instance_prefix.  If depth_camera is None,
-    then a default camera info will be used.  If renderer is None, then we will
-    assume the name 'my_renderer', and create a VTK renderer if a renderer of
-    that name doesn't exist.
-
-    Rn this only works for adding one camera because the icp stuff won't merge more
-    """
-    if sys.platform == "linux" and os.getenv("DISPLAY") is None:
-        from pyvirtualdisplay import Display
-        virtual_display = Display(visible=0, size=(1400, 900))
-        virtual_display.start()
-
-    if not renderer:
-        renderer = "my_renderer"
-
-    if not scene_graph.HasRenderer(renderer):
-        scene_graph.AddRenderer(renderer,
-                                MakeRenderEngineVtk(RenderEngineVtkParams()))
-
-    if not depth_camera:
-        depth_camera = DepthRenderCamera(
-            RenderCameraCore(
-                # renderer, CameraInfo(width=640, height=480, fov_y=np.pi / 4.0),
-                # ClippingRange(near=0.1, far=10.0), RigidTransform()),
-                renderer, CameraInfo(width=1920, height=1080, fov_y=np.pi / 6.0),
-                ClippingRange(near=0.1, far=10.0), RigidTransform()),
-            DepthRange(0.1, 10.0))
-
-    pcd_ports = []
-
-    for index in range(plant.num_model_instances()):
-        model_instance_index = ModelInstanceIndex(index)
-        model_name = plant.GetModelInstanceName(model_instance_index)
-
-        if model_name.startswith(model_instance_prefix):
-            body_index = plant.GetBodyIndices(model_instance_index)[0]
-            rgbd = builder.AddSystem(
-                RgbdSensor(parent_id=plant.GetBodyFrameIdOrThrow(body_index),
-                           X_PB=RigidTransform(),
-                           depth_camera=depth_camera,
-                           show_window=False))
-            rgbd.set_name(model_name)
-
-            builder.Connect(scene_graph.get_query_output_port(),
-                            rgbd.query_object_input_port())
-
-            # Export the camera outputs
-            builder.ExportOutput(rgbd.color_image_output_port(),
-                                 f"{model_name}_rgb_image")
-            builder.ExportOutput(rgbd.depth_image_32F_output_port(),
-                                 f"{model_name}_depth_image")
-            builder.ExportOutput(rgbd.label_image_output_port(),
-                                 f"{model_name}_label_image")
-
-            if also_add_point_clouds:
-                # Add a system to convert the camera output into a point cloud
-                to_point_cloud = builder.AddSystem(
-                    DepthImageToPointCloud(camera_info=rgbd.depth_camera_info(),
-                                           fields=BaseField.kXYZs
-                                           | BaseField.kRGBs))
-                builder.Connect(rgbd.depth_image_32F_output_port(),
-                                to_point_cloud.depth_image_input_port())
-                builder.Connect(rgbd.color_image_output_port(),
-                                to_point_cloud.color_image_input_port())
-
-                class ExtractBodyPose(LeafSystem):
-
-                    def __init__(self, body_index):
-                        LeafSystem.__init__(self)
-                        self.body_index = body_index
-                        self.DeclareAbstractInputPort(
-                            "poses",
-                            plant.get_body_poses_output_port().Allocate())
-                        self.DeclareAbstractOutputPort(
-                            "pose",
-                            lambda: AbstractValue.Make(RigidTransform()),
-                            self.CalcOutput)
-
-                    def CalcOutput(self, context, output):
-                        poses = self.EvalAbstractInput(context, 0).get_value()
-                        pose = poses[int(self.body_index)]
-                        output.get_mutable_value().set(pose.rotation(),
-                                                       pose.translation())
-
-
-                camera_pose = builder.AddSystem(ExtractBodyPose(body_index))
-                builder.Connect(plant.get_body_poses_output_port(),
-                                camera_pose.get_input_port())
-                builder.Connect(camera_pose.get_output_port(),
-                                to_point_cloud.GetInputPort("camera_pose"))
-
-                # Export the point cloud output.
-                builder.ExportOutput(to_point_cloud.point_cloud_output_port(),
-                                     f"{model_name}_point_cloud")
-
-
-                masks = builder.AddSystem(ExtractMasks(rgbd))
-                builder.Connect(rgbd.color_image_output_port(),
-                    masks.GetInputPort('rgb_image'))
-                builder.Connect(rgbd.depth_image_32F_output_port(),
-                    masks.GetInputPort('depth_image'))
-                builder.ExportOutput(masks.GetOutputPort('masked_depth_image'),
-                    f"{model_name}_masked_depth_image")
-
-                pcds = builder.AddSystem(CreatePointclouds(rgbd))
-                builder.Connect(masks.GetOutputPort('masked_depth_image'),
-                    pcds.GetInputPort('depth_image_stack'))
-                builder.Connect(rgbd.body_pose_in_world_output_port(),
-                    pcds.GetInputPort('rgbd_sensor_body_pose'))
-                builder.ExportOutput(pcds.GetOutputPort('pcd_stack'),
-                    f"{model_name}_pcd_stack")
-
-                # icp = builder.AddSystem(CreatePointclouds(rgbd))
-                # icp = builder.AddSystem(ICPSystem())
-                # builder.Connect(pcd_port_0.GetOutputPort('pcd_stack'),
-                #     icp.GetInputPort('raw_pcd_stack'))
-
-                # builder.ExportOutput(icp.GetOutputPort('icp_pcd_stack'),
-                #     'icp_pcd_stack')
-
-                pcd_ports.append(pcds)
-
-    ports = {
-        'pcd_ports': pcd_ports,
-    }
-
-    return ports
-
-
-def AddPanda(plant, collide=True):
-    """
-    Add panda urdf to plant.  Custom function by Ethan, may break.
-
-    Args:
-        plant (???): Plant created by drake.
-
-    Returns:
-        ???: Index of panda in plant.
-    """
-    if collide:
-        sdf_path = FindResourceOrThrow(
-        "drake/manipulation/models/"
-        # "franka_description/urdf/panda_arm_hand.urdf")
-        "franka_description/urdf/panda_arm.urdf")
-    else:
-        sdf_path = FindResourceOrThrow(
-        "drake/manipulation/models/"
-        # "franka_description/urdf/panda_arm_hand_no_collide.urdf")
-        "franka_description/urdf/panda_arm_no_collide.urdf")
-
-
-    parser = Parser(plant)
-    panda = parser.AddModelFromFile(sdf_path)
-
-    panda_base_frame = plant.GetFrameByName('panda_link0')
-    panda_transform = RigidTransform(
-    RollPitchYaw(np.asarray([0, 0, -np.pi/2])), p=[0, 0.45, 0])
-
-    plant.WeldFrames(plant.world_frame(), panda_base_frame, panda_transform)
-
-    # Set default positions:
-    # q0 = [0.0, 0.0, 0, -1.2, 0, 1.6, 0]
-    # q0 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-    q0 = [0.0, 0, 0.0, -np.pi/2, 0.0, 1.60, np.pi/4]
-    index = 0
-    for joint_index in plant.GetJointIndices(panda):
-        joint = plant.get_mutable_joint(joint_index)
-        if isinstance(joint, RevoluteJoint):
-            joint.set_default_angle(q0[index])
-            index += 1
-
-    return panda
-
-
-def AddWsgPanda(plant,
-           panda_model_instance,
-           roll=-np.pi / 4.0,
-           sphere=False):
-    parser = Parser(plant)
-    gripper = parser.AddModelFromFile(
-        FindResourceOrThrow(
-            "drake/manipulation/models/"
-            "wsg_50_description/sdf/schunk_wsg_50_with_tip.sdf"))
-
-    # X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0, 0, 0.09])
-    # X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0.01, -0.01, 0.04])
-    X_7G = RigidTransform(RollPitchYaw(np.pi / 2.0, 0, roll), [0.00, 0.00, 0.04])
-    plant.WeldFrames(plant.GetFrameByName("panda_link8", panda_model_instance),
-                     plant.GetFrameByName("body", gripper), X_7G)
-    return gripper
-
-
-def AddPandaDifferentialIK(builder, plant, frame=None):
-    params = DifferentialInverseKinematicsParameters(plant.num_positions(),
-                                                     plant.num_velocities())
-    time_step = plant.time_step()
-    q0 = plant.GetPositions(plant.CreateDefaultContext())
-    params.set_nominal_joint_position(q0)
-    params.set_end_effector_angular_speed_limit(2)
-    params.set_end_effector_translational_velocity_limits([-2, -2, -2],
-                                                          [2, 2, 2])
-    panda_velocity_limits = 0.5 * np.array([1.4, 1.4, 1.7, 1.3, 2.2, 2.3, 2.3])
-    params.set_joint_velocity_limits(
-        (-panda_velocity_limits, panda_velocity_limits))
-    params.set_joint_centering_gain(10 * np.eye(7))
-    if frame is None:
-        frame = plant.GetFrameByName("body")
-    differential_ik = builder.AddSystem(
-        DifferentialInverseKinematicsIntegrator(
-            plant,
-            frame,
-            time_step,
-            params,
-            log_only_when_result_state_changes=True))
-    return differential_ik
-
-
-# class RobotStatus():
-#     def __init__(self):
-#         self.gripper_status = 'closed'  # closed or open
-
-#     def set_gripper_status(self, status):
-#         self.gripper_status = status
-
-#     def get_gripper_status(self):
-#         return self.gripper_status
-
-# # class WsgAuto(LeafSystem):
-
-#     def __init__(self, robot_status: RobotStatus):
-#         LeafSystem.__init__(self)
-#         port = self.DeclareVectorOutputPort("wsg_position", 1,
-#                                             self.DoCalcOutput)
-#         port.disable_caching_by_default()
-#         self.robot_status = robot_status
-#         self.prev_status = 'closed'
-
-#     def DoCalcOutput(self, context, output):
-#         new_status = self.robot_status.get_gripper_status()
-#         if self.prev_status != new_status:
-#             print(new_status)
-#             self.prev_status = new_status
-#         if self.robot_status.get_gripper_status() == 'closed':
-#             position = 0.002
-#         else:
-#             position = 0.107
-
-#         output.SetAtIndex(0, position)
-
-# class RobotWsgButtonPanda(LeafSystem):
-
-#     def __init__(self, meshcat, robot_status: RobotStatus):
-#         LeafSystem.__init__(self)
-#         port = self.DeclareVectorOutputPort("wsg_position", 1,
-#                                             self.DoCalcOutput)
-#         self.DeclareVectorInputPort("wsg_state_measured", 2)
-#         # self.DeclareVectorInputPort("wsg_force_measured", 1)
-
-#         port.disable_caching_by_default()
-#         self._meshcat = meshcat
-#         self._button = "Open/Close Gripper"
-#         meshcat.AddButton(self._button, "Space")
-#         print("Press Space to open/close the gripper")
-
-#         # Define what open and closed distance is (I have the gripper open
-#         # less than its maximum travel)
-
-#         self.state_loc = {
-#             'closed': 0.002,
-#             'open': 0.050,
-#         }
-#         self._desired_state = 'open'
-#         self._prev_clicks = 0  # Used to tell if the user has attempted to close
-#         self.robot_status = robot_status
-#         self._prev_robot_status = 'open'
-
-#     def __del__(self):
-#         self._meshcat.DeleteButton(self._button)
-
-#     def DoCalcOutput(self, context, output):
-#         clicks = self._meshcat.GetButtonClicks(self._button)
-
-#         current_position = self.GetInputPort('wsg_state_measured').Eval(context)[0]
-#         current_state = self.get_current_state(current_position)
-
-#         to_switch = clicks > self._prev_clicks or self._prev_robot_status != self.robot_status.get_gripper_status()
-
-#         # Only flip state if we are in the previously desired state
-#         if current_state == self._desired_state and to_switch:
-#             self._prev_robot_status = self.robot_status.get_gripper_status()
-#             self._prev_clicks = clicks
-#             if self.robot_status.get_gripper_status() != self._desired_state:
-#                 if self._desired_state == 'closed':
-#                     self._desired_state = 'open'
-#                 else:
-#                     self._desired_state = 'closed'
-
-#         output.SetAtIndex(0, self.state_loc[self._desired_state])
-
-#     def get_current_state(self, position, eps = 0.01):
-#         # How far the jaws are from being open
-#         open_dis = abs(self.state_loc['open'] - position)
-
-#         if open_dis < eps:
-#             return 'open'
-#         return 'closed'
