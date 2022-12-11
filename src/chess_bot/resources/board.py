@@ -287,7 +287,7 @@ class Board:
             board (list[list[str]]): Board as 8x8 list of lists
         """
         for row in range(7, -1, -1):
-            for col in range(0, 7):
+            for col in range(0, 8):
                 print(board[col][row], end=' ')
             print()
 

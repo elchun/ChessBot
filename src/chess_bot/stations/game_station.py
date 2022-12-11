@@ -33,7 +33,8 @@ from pydrake.all import (
     SchunkWsgPositionController,
     StateInterpolatorWithDiscreteDerivative,
     Role,
-    MeshcatVisualizer)
+    MeshcatVisualizer,
+    RotationMatrix)
 
 from chess_bot.utils.utils import colorize_labels
 
@@ -478,7 +479,7 @@ class GameStation():
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 1.0)
 
     # -- Functions for gameplay -- #
-    def play_game(self, pre_move_list: list[str]=None):
+    def play_game(self, pre_move_list: list[str]=[]):
         # castle using the king coordinates
 
         prev_board = deepcopy(Board.starting_board_list)
@@ -604,6 +605,171 @@ class GameStation():
             for robot_start_pos, robot_end_pos in moves_made:
                 prev_board[robot_end_pos[0]][robot_end_pos[1]] = prev_board[robot_start_pos[0]][robot_start_pos[1]]
                 prev_board[robot_start_pos[0]][robot_start_pos[1]] = '  '
+
+    def auto_play_game(self, user_stockfish: Stockfish, pre_move_list: list[str]=[]):
+        # castle using the king coordinates
+
+        prev_board = deepcopy(Board.starting_board_list)
+        self.robot_status.set_pose_value(z=0.4)
+
+        if pre_move_list:
+            print('Setting from initial state!')
+        for move in pre_move_list:
+            start_pos_str = move[:2]
+            end_pos_str = move[2:]
+            start_pos = Board.location_to_coord(start_pos_str)
+            end_pos = Board.location_to_coord(end_pos_str)
+
+            # Check if we're castling
+            moves_made = self.move_castle(start_pos, end_pos, prev_board, use_robot=False)
+
+            if not moves_made:
+                self.make_move(start_pos, end_pos)
+                moves_made = [(start_pos, end_pos)]
+
+
+            for _start_pos, _end_pos in moves_made:
+                prev_board[_end_pos[0]][_end_pos[1]] = prev_board[_start_pos[0]][_start_pos[1]]
+                prev_board[_start_pos[0]][_start_pos[1]] = '  '
+
+            self.stockfish.make_moves_from_current_position([move])
+            if user_stockfish:
+                user_stockfish.make_moves_from_current_position([move])
+
+        if pre_move_list:
+            print('Done setting board!')
+
+        turns = 0
+        perception_errors = 0
+        other_errors = 0
+        try:
+            while True:
+                move_correct = False
+                while not move_correct:
+                    # Get player move (Player is always white)
+                    try:
+                        if user_stockfish:
+                            player_move = user_stockfish.get_best_move()
+                            if player_move is None:  # Robot won
+                                # print(f'Errors: {errors} | Turns: {turns} | Completed: {True}')
+                                return perception_errors, other_errors, turns, True  # Completed successfully
+                            user_stockfish.make_moves_from_current_position([player_move])
+                            player_start_pos_str = player_move[:2]
+                            player_end_pos_str = player_move[2:]
+                            player_start_pos = Board.location_to_coord(player_start_pos_str)
+                            player_end_pos = Board.location_to_coord(player_end_pos_str)
+                        else:
+                            player_start_pos, player_end_pos = self._get_player_move()
+                    except ValueError:
+                        print('Exiting!')
+                        return
+                    clear_output()
+
+                    moves_made = self.move_castle(player_start_pos, player_end_pos, prev_board, use_robot=False)
+                    if not moves_made:
+                        if not self.make_move(player_start_pos, player_end_pos):
+                            print('Invalid move')
+                            continue
+
+                    # -- Run perception system to get pcds-- #
+                    print('Getting robot move')
+                    pcds, pieces = self.get_processed_pcds()
+                    location_to_piece = self.extract_piece_locations(pcds, pieces)
+
+                    current_board = [['  ' for i in range(8)] for j in range(8)]
+                    for coord, piece in location_to_piece:
+                        loc = self.board.coord_to_index(coord)
+                        current_board[loc[0]][loc[1]] = piece
+                        # res[7-loc[1]][loc[0]] = piece
+
+                    # -- Plot perception system -- #
+                    print('-'*23)
+                    print('Robot understanding of board:')
+                    Board.print_board(current_board)
+                    print('-'*23)
+
+                    # fig = multiplot(pcds)
+                    # fig_path = osp.join(get_chessbot_src(), 'demos/game_viz.html')
+                    # fig.write_html(fig_path)
+                    # iplot(fig)
+
+                    # self.show_mask_labeled_image()
+
+
+                    # -- Derive player move from perception -- #
+                    move_correct = False
+
+                    # TODO: Update this to use castling move
+                    derived_player_move = Board.get_move(prev_board, current_board)
+
+                    print(f'Actual move: {player_start_pos} -> {player_end_pos}')
+                    print(f'Predicted move: {derived_player_move[0]} -> {derived_player_move[1]}')
+                    # Catch error and correct it.
+                    if player_start_pos != derived_player_move[0] or player_end_pos != derived_player_move[1]:
+                        perception_errors += 1
+                        corrected_player_move = (player_start_pos, player_end_pos)
+                        derived_player_move = corrected_player_move
+
+
+                    der_player_start_pos_str = Board.index_to_location(derived_player_move[0])
+                    der_player_end_pos_str = Board.index_to_location(derived_player_move[1])
+                    der_player_move = der_player_start_pos_str + der_player_end_pos_str
+                    move_correct = self.stockfish.is_move_correct(der_player_move)
+                    if not move_correct:
+                        print(f'{der_player_move} is not correct, try again!')
+                        # Reset piece to orinal location
+                        self.make_move(player_end_pos, player_start_pos)
+
+                # Update internal boards
+                self.stockfish.make_moves_from_current_position([der_player_move])
+                prev_board[derived_player_move[1][0]][derived_player_move[1][1]] = prev_board[derived_player_move[0][0]][derived_player_move[0][1]]
+                prev_board[derived_player_move[0][0]][derived_player_move[0][1]] = '  '
+
+
+                robot_move = self.stockfish.get_best_move()
+                if robot_move is None:
+                    print('Human wins!')
+                    ori_z = self.robot_status.get_pose_value('z')
+                    ori_y = self.robot_status.get_pose_value('y')
+                    self.robot_status.set_pose_value(z=0.1, y=-0.1)
+                    self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+                    print("(But I'll win the next one)")
+                    self.robot_status.set_pose_value(z=ori_z, y=ori_y)
+                    self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 5)
+                    turns += 1
+                    # print(f'Errors: {errors} | Turns: {turns} | Completed: {True}')
+                    return perception_errors, other_errors, turns, True  # Completed successfully
+
+                self.stockfish.make_moves_from_current_position([robot_move])
+                user_stockfish.make_moves_from_current_position([robot_move])
+
+                robot_start_pos_str = robot_move[:2]
+                robot_end_pos_str = robot_move[2:]
+                robot_start_pos = Board.location_to_coord(robot_start_pos_str)
+                robot_end_pos = Board.location_to_coord(robot_end_pos_str)
+
+                print(f'Robot move: {robot_start_pos} -> {robot_end_pos}')
+
+                moves_made = self.move_castle(robot_start_pos, robot_end_pos, prev_board, use_robot=True, pcds=pcds)
+                if not moves_made:
+                    moves_made = [(robot_start_pos, robot_end_pos)]
+                    _, corrected = self.make_move_with_robot(robot_start_pos, robot_end_pos, pcds, apply_correction=True)
+                    perception_errors += corrected
+
+                    # other_errors += self.correct_robot_move()
+
+                for robot_start_pos, robot_end_pos in moves_made:
+                    prev_board[robot_end_pos[0]][robot_end_pos[1]] = prev_board[robot_start_pos[0]][robot_start_pos[1]]
+                    prev_board[robot_start_pos[0]][robot_start_pos[1]] = '  '
+
+                turns += 1
+
+        except:
+            turns += 1
+            other_errors += 1
+            # print(f'Errors: {errors} | Turns: {turns} | Completed: {False}')
+            return perception_errors, other_errors, turns, False  # Ran into error
+
 
     def move_castle(self, start_pos, end_pos, prev_board, use_robot, pcds=None):
         moves_to_make = []
@@ -817,7 +983,7 @@ class GameStation():
         return True
 
     def make_move_with_robot(self, start_loc: tuple[int], end_loc: tuple[int],
-        pcds) -> bool:
+        pcds, apply_correction=False) -> bool:
         """
         Move piece at start_loc (0-indexed) to location end_loc (0-indexed).
 
@@ -828,6 +994,7 @@ class GameStation():
         Returns:
             bool: True if piece was moved, False otherwise
         """
+        corrected = False
         if self.grasp_yaw is None:
             self.grasp_yaw = self.robot_status.get_pose_value('yaw') + np.pi/4
         home_x, home_y, home_z = 0, 0, 0.4
@@ -845,10 +1012,23 @@ class GameStation():
         end_grasp_coords = None
         for grasp_location in grasp_locations:
             grasp_location_idx = self.board.coord_to_index(grasp_location[:2])
+
+            # Use ground truth location if pcd is bad.  For evaluation only (so game can continue if perception is bad)
+            if apply_correction:
+                grasp_location, move_corrected = self.correct_grasp_location(grasp_location_idx, grasp_location)
+
             if grasp_location_idx == start_loc:
+                if move_corrected:
+                    corrected = True
                 start_grasp_coords = grasp_location
+
             if grasp_location_idx == end_loc:
+                if move_corrected:
+                    corrected = True
                 end_grasp_coords = grasp_location
+
+        print(f'Corrected the move: {corrected}')
+
 
         place_x, place_y = self.board.get_xy_location_from_idx(end_loc[0], end_loc[1])
         ref_grasp_x, ref_grasp_y = self.board.get_xy_location_from_idx(start_loc[0], start_loc[1])
@@ -918,7 +1098,33 @@ class GameStation():
         self.robot_status.set_pose_value(x = home_x, y = home_y, z = home_z, yaw=self.grasp_yaw)
         self.simulator.AdvanceTo(self.simulator.get_context().get_time() + 3)
 
-        return True
+        return True, corrected
+
+    def correct_grasp_location(self, loc, derived_grasp_coords) -> int:
+        """
+        Helper method for evaluating the robot.  Will correct an infered grasp
+        location if it is incorrect.
+
+        Returns:
+            tuple: new grasp coordinates and true if corrected (else false)
+        """
+        eps = 0.01
+        res_grasp_coords = list(derived_grasp_coords)
+        corrected = False
+        for idx in self.idx_to_location.keys():
+            piece = self.plant.GetBodyByName("piece_body", idx)
+            pose = self.plant.GetFreeBodyPose(self.mut_plant_context,
+                piece)
+
+            xyz = pose.translation()
+            if self.board.coord_to_index((xyz[0], xyz[1])) == loc:
+                if abs(derived_grasp_coords[0] - xyz[0]) > eps:
+                    res_grasp_coords[0] = xyz[0]
+                    corrected = True
+                if abs(derived_grasp_coords[1] - xyz[1]) > eps:
+                    res_grasp_coords[1] = xyz[1]
+                    corrected = True
+        return res_grasp_coords, corrected
 
     def _pcds_to_grasp_locations(self, pcds: list[np.ndarray]) -> list[np.ndarray]:
         grasp_locations = []
