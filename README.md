@@ -5,6 +5,8 @@ It uses a combination of Deep Perception (Mask R-CNN, ICP), Chess Engine (Stockf
 manipulated pieces on a chess board.  Running the `ipynb` files in demos
 allows a user to play against the robot, as well as experiment with the simulation and perception systems.
 
+Please see our supplementary [video](https://youtu.be/B49J5w8MMrM) for a demonstration and technical overview of ChessBot.
+
 
 
 ## Setup
